@@ -28,6 +28,7 @@ Experimental, pure Rust runtime for Spine 4.3 (unofficial).
 
 - `spine2d`: core runtime + parsing + renderer-agnostic render output.
 - `spine2d-wgpu`: wgpu renderer integration built on top of `spine2d`.
+- `spine2d-bevy`: Bevy `Material2d` backend built on top of the core runtime.
 - `spine2d-web`: Trunk + wgpu web demo/viewer (`wasm32-unknown-unknown`).
 
 
@@ -76,6 +77,67 @@ These files are not committed here by default.
 - Then run: `cd spine2d-web && trunk serve`
   - The demo will auto-detect `assets/spine-runtimes/web_manifest.json` and populate the Example dropdown.
   - Optional URL params: `?example=spineboy&anim=run`
+
+### Bevy backend
+
+The Bevy examples can run with bundled demo assets, but the interactive viewer
+needs local Spine example exports for the full example/animation/skin switcher.
+Prepare those assets first when you want to test with real upstream data:
+
+```sh
+python3 ./scripts/prepare_spine_runtimes_web_assets.py --scope tests
+```
+
+The script writes ignored files under `assets/spine-runtimes/`, including
+`assets/spine-runtimes/web_manifest.json`. Without that manifest, the viewer
+falls back to the bundled `demo` assets.
+
+Run the built-in Bevy examples:
+
+- `cargo run -p spine2d-bevy --example basic`
+- `cargo run -p spine2d-bevy --example metadata`
+- `cargo run -p spine2d-bevy --example bounds`
+- `cargo run -p spine2d-bevy --example multi_spine`
+- `cargo run -p spine2d-bevy --example viewer`
+
+The viewer reads `assets/spine-runtimes/web_manifest.json` and lets you switch examples,
+animations, skins, playback state, speed, and camera fit from the keyboard.
+
+The Bevy integration is centered on a public `Spine` component plus optional
+runtime control components:
+
+```rust
+use bevy::prelude::*;
+use spine2d_bevy::{Spine, Spine2dPlugin};
+
+fn main() {
+    App::new()
+        .add_plugins(DefaultPlugins)
+        .add_plugins(Spine2dPlugin)
+        .add_systems(Startup, setup)
+        .run();
+}
+
+fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.spawn(Spine::new(
+        asset_server.load("demo.json"),
+        asset_server.load("demo.atlas"),
+    ).with_animation("spin", true));
+}
+```
+
+Add `SpineAnimation` or `SpineSkin` only when you want component-driven runtime
+control after spawn. Gameplay systems can also write `SpineAnimationCommand`
+messages to set, queue, or clear track animations without accessing internal
+runtime handles. Animation lifecycle and custom Spine timeline events are
+published as `SpineAnimationEvent` messages.
+
+Use the public `SpineReady` marker or `SpineLifecycleEvent` messages to observe
+when an entity has an active runtime instance. `SpineLifecycleEvent` also reports
+when that instance is released because the component was removed, the entity was
+despawned, or a skeleton/atlas asset reload invalidated the runtime.
+The backend maintains a public `SpineBounds` component with the current Bevy
+local-space bounds for camera fitting, hit areas, and gameplay queries.
 
 ## License
 
