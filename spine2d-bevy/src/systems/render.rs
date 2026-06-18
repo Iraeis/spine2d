@@ -93,6 +93,7 @@ pub fn render_spines(
                 &instance.atlas_directory,
                 spine_entity,
                 draw_list,
+                instance.flip_y,
                 render_layers,
             );
             signature_cache.signature = SpineRenderSignature {
@@ -113,6 +114,7 @@ pub fn render_spines(
                 &instance.atlas_directory,
                 spine_entity,
                 draw_list,
+                instance.flip_y,
                 render_layers,
             );
             signature_cache.signature = SpineRenderSignature {
@@ -139,6 +141,7 @@ pub fn render_spines(
                 &instance.atlas_directory,
                 spine_entity,
                 draw_list,
+                instance.flip_y,
                 render_layers,
             );
             signature_cache.signature = SpineRenderSignature {
@@ -161,7 +164,7 @@ pub fn render_spines(
 
         for (draw, mesh_handle) in draw_list.draws.iter().zip(mesh_child_handles.iter()) {
             if let Some(mesh) = render_assets.meshes.get_mut(mesh_handle) {
-                write_mesh_data(mesh, draw_list, draw);
+                write_mesh_data(mesh, draw_list, draw, instance.flip_y);
             }
         }
     }
@@ -181,7 +184,12 @@ fn collect_mesh_children(
     })
 }
 
-fn write_mesh_data(mesh: &mut Mesh, draw_list: &spine2d::DrawList, draw: &spine2d::Draw) {
+fn write_mesh_data(
+    mesh: &mut Mesh,
+    draw_list: &spine2d::DrawList,
+    draw: &spine2d::Draw,
+    flip_y: bool,
+) {
     let raw_indices = &draw_list.indices[draw.first_index..draw.first_index + draw.index_count];
     let Some(min_vertex) = raw_indices.iter().min().map(|i| *i as usize) else {
         mesh.insert_indices(Indices::U32(Vec::new()));
@@ -201,7 +209,17 @@ fn write_mesh_data(mesh: &mut Mesh, draw_list: &spine2d::DrawList, draw: &spine2
 
     let positions = vertex_slice
         .iter()
-        .map(|v| [v.position[0], v.position[1], 0.0])
+        .map(|v| {
+            [
+                v.position[0],
+                if flip_y {
+                    -v.position[1]
+                } else {
+                    v.position[1]
+                },
+                0.0,
+            ]
+        })
         .collect::<Vec<_>>();
     let normals = vec![[0.0, 0.0, 1.0]; vertex_slice.len()];
     let uvs = vertex_slice.iter().map(|v| v.uv).collect::<Vec<_>>();
@@ -225,6 +243,7 @@ fn spawn_mesh_children(
     atlas_dir: &str,
     spine_entity: Entity,
     draw_list: &spine2d::DrawList,
+    flip_y: bool,
     render_layers: Option<&RenderLayers>,
 ) {
     commands.entity(spine_entity).with_children(|parent| {
@@ -233,7 +252,7 @@ fn spawn_mesh_children(
                 PrimitiveTopology::TriangleList,
                 RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
             );
-            write_mesh_data(&mut mesh, draw_list, draw);
+            write_mesh_data(&mut mesh, draw_list, draw, flip_y);
 
             let mesh_handle = render_assets.meshes.add(mesh);
             let texture_path = texture_asset_path(atlas_dir, draw.texture_path.as_str());
@@ -361,7 +380,7 @@ mod tests {
             RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
         );
 
-        write_mesh_data(&mut mesh, &draw_list, &draw);
+        write_mesh_data(&mut mesh, &draw_list, &draw, false);
 
         let Some(VertexAttributeValues::Float32x3(positions)) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)
@@ -369,5 +388,47 @@ mod tests {
             panic!("position attribute should be Float32x3");
         };
         assert_eq!(positions, &vec![[1.0, 2.0, 0.0], [4.0, 5.0, 0.0]]);
+    }
+
+    #[test]
+    fn write_mesh_data_flips_spine_y_axis_when_requested() {
+        let draw_list = DrawList {
+            vertices: vec![
+                Vertex {
+                    position: [1.0, 2.0],
+                    uv: [0.0, 0.0],
+                    color: [1.0; 4],
+                    dark_color: [0.0; 4],
+                },
+                Vertex {
+                    position: [4.0, 5.0],
+                    uv: [1.0, 1.0],
+                    color: [1.0; 4],
+                    dark_color: [0.0; 4],
+                },
+            ],
+            indices: vec![0, 1],
+            draws: Vec::new(),
+        };
+        let draw = Draw {
+            texture_path: "page.png".to_owned(),
+            blend: BlendMode::Normal,
+            premultiplied_alpha: false,
+            first_index: 0,
+            index_count: 2,
+        };
+        let mut mesh = Mesh::new(
+            PrimitiveTopology::TriangleList,
+            RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+        );
+
+        write_mesh_data(&mut mesh, &draw_list, &draw, true);
+
+        let Some(VertexAttributeValues::Float32x3(positions)) =
+            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+        else {
+            panic!("position attribute should be Float32x3");
+        };
+        assert_eq!(positions, &vec![[1.0, -2.0, 0.0], [4.0, -5.0, 0.0]]);
     }
 }

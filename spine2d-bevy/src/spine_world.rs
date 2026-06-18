@@ -18,6 +18,7 @@ pub(crate) struct SpineInstance {
     pub loop_animation: bool,
     pub time_scale: f32,
     pub skin_name: Option<String>,
+    pub flip_y: bool,
     pending_events: SpineEventBuffer,
 }
 
@@ -30,6 +31,7 @@ pub(crate) struct SpineInstanceParts {
     pub loop_animation: bool,
     pub time_scale: f32,
     pub skin_name: Option<String>,
+    pub flip_y: bool,
 }
 
 impl SpineInstance {
@@ -44,6 +46,7 @@ impl SpineInstance {
             loop_animation: parts.loop_animation,
             time_scale: parts.time_scale,
             skin_name: parts.skin_name,
+            flip_y: parts.flip_y,
             pending_events: SpineEventBuffer::default(),
         }
     }
@@ -213,6 +216,7 @@ mod tests {
             loop_animation: true,
             time_scale: 1.0,
             skin_name: None,
+            flip_y: false,
         })
     }
 

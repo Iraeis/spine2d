@@ -43,6 +43,19 @@ impl Default for Spine {
     }
 }
 
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SpineFlipY(pub bool);
+
+impl SpineFlipY {
+    pub fn new(flip_y: bool) -> Self {
+        Self(flip_y)
+    }
+
+    pub fn flipped() -> Self {
+        Self(true)
+    }
+}
+
 #[derive(Component, Clone, Debug, PartialEq)]
 pub struct SpineAnimation {
     pub name: Option<String>,

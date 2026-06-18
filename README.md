@@ -127,10 +127,12 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 ```
 
 Add `SpineAnimation` or `SpineSkin` only when you want component-driven runtime
-control after spawn. Gameplay systems can also write `SpineAnimationCommand`
-messages to set, queue, or clear track animations without accessing internal
-runtime handles. Animation lifecycle and custom Spine timeline events are
-published as `SpineAnimationEvent` messages.
+control after spawn. Use `SpineFlipY(true)` when your project uses a Y-down
+space and you want the backend to mirror Spine geometry for you. Gameplay
+systems can also write `SpineAnimationCommand` messages to set, queue, or clear
+track animations without accessing internal runtime handles. Animation
+lifecycle and custom Spine timeline events are published as
+`SpineAnimationEvent` messages.
 
 Use the public `SpineReady` marker or `SpineLifecycleEvent` messages to observe
 when an entity has an active runtime instance. `SpineLifecycleEvent` also reports
@@ -138,6 +140,12 @@ when that instance is released because the component was removed, the entity was
 despawned, or a skeleton/atlas asset reload invalidated the runtime.
 The backend maintains a public `SpineBounds` component with the current Bevy
 local-space bounds for camera fitting, hit areas, and gameplay queries.
+
+Coordinate note: `spine2d-bevy` forwards Spine-local positions into Bevy
+without an implicit Y flip by default. Bevy world space is also Y-up, so the
+backend stays convention-neutral unless you opt in to `SpineFlipY(true)`. If a
+project uses Y-down or screen-space coordinates, attach `SpineFlipY(true)` to
+the entity or apply that conversion in the game's own transform/camera layer.
 
 ## License
 

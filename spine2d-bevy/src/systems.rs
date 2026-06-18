@@ -12,9 +12,9 @@ pub use render::render_spines;
 
 use crate::{
     Spine, SpineAnimation, SpineAnimationCommand, SpineAnimationCommandKind, SpineAnimationEvent,
-    SpineAtlasAsset, SpineBounds, SpineDrawSignatureCache, SpineInstance, SpineInstanceKey,
-    SpineInstanceParts, SpineLifecycleEvent, SpineLifecycleEventKind, SpineMeshChild, SpineReady,
-    SpineReleaseReason, SpineSkeletonAsset, SpineSkin, SpineWorld,
+    SpineAtlasAsset, SpineBounds, SpineDrawSignatureCache, SpineFlipY, SpineInstance,
+    SpineInstanceKey, SpineInstanceParts, SpineLifecycleEvent, SpineLifecycleEventKind,
+    SpineMeshChild, SpineReady, SpineReleaseReason, SpineSkeletonAsset, SpineSkin, SpineWorld,
 };
 
 type SpawnSpineQuery<'w, 's> = Query<
@@ -26,6 +26,7 @@ type SpawnSpineQuery<'w, 's> = Query<
         Option<&'static SpineInstanceKey>,
         Option<&'static SpineAnimation>,
         Option<&'static SpineSkin>,
+        Option<&'static SpineFlipY>,
         Option<&'static SpineDrawSignatureCache>,
     ),
     Or<(Without<SpineInstanceKey>, Changed<Spine>)>,
@@ -39,6 +40,7 @@ type UpdateSpineQuery<'w, 's> = Query<
         &'static SpineInstanceKey,
         Option<Ref<'static, SpineAnimation>>,
         Option<Ref<'static, SpineSkin>>,
+        Option<&'static SpineFlipY>,
         Option<&'static mut SpineBounds>,
     ),
 >;
@@ -69,7 +71,7 @@ pub fn spawn_spine_instances(
     query: SpawnSpineQuery,
     mesh_children: SpineMeshChildrenParam,
 ) {
-    for (entity, spine, existing_key, animation, skin, draw_signature_cache) in &query {
+    for (entity, spine, existing_key, animation, skin, flip_y, draw_signature_cache) in &query {
         if existing_key.is_some() {
             if spine_world.remove_by_owner(entity).is_some() {
                 lifecycle_events.write(SpineLifecycleEvent {
@@ -101,6 +103,7 @@ pub fn spawn_spine_instances(
         let skin_component = skin.cloned().unwrap_or_else(|| SpineSkin {
             name: spine.skin.clone(),
         });
+        let flip_y = flip_y.map(|flip_y| flip_y.0).unwrap_or(false);
 
         let skeleton_data = skeleton_asset.data.clone();
         let mut skeleton = Skeleton::new(skeleton_data.clone());
@@ -118,6 +121,7 @@ pub fn spawn_spine_instances(
             loop_animation: animation_component.loop_animation,
             time_scale: animation_component.time_scale,
             skin_name: skin_component.name.clone(),
+            flip_y,
         });
         instance.attach_event_listener();
         if let Some(animation_name) = animation_component.name.as_deref() {
@@ -132,7 +136,7 @@ pub fn spawn_spine_instances(
         rebuild_pose(&mut instance, 0.0);
         let _ = instance.drain_events();
 
-        let new_bounds = draw_list_bounds(&instance.draw_list);
+        let new_bounds = draw_list_bounds(&instance.draw_list, instance.flip_y);
         let id = spine_world.insert(entity, instance);
         let mut entity_commands = commands.entity(entity);
         entity_commands.insert(SpineInstanceKey(id));
@@ -330,7 +334,7 @@ pub fn update_spine_animations(
     mut query: UpdateSpineQuery,
     time: Res<Time>,
 ) {
-    for (entity, key, animation_ref, skin_ref, bounds) in &mut query {
+    for (entity, key, animation_ref, skin_ref, flip_y, bounds) in &mut query {
         let Some(instance) = spine_world.get_mut(key.0) else {
             warn!("Missing Spine runtime instance for {entity:?}");
             continue;
@@ -369,9 +373,13 @@ pub fn update_spine_animations(
             }
         }
 
+        let new_flip_y = flip_y.map(|flip_y| flip_y.0).unwrap_or(false);
+        if instance.flip_y != new_flip_y {
+            instance.flip_y = new_flip_y;
+        }
         rebuild_pose(instance, time.delta().as_secs_f32() * instance.time_scale);
         if let Some(mut bounds) = bounds {
-            *bounds = draw_list_bounds(&instance.draw_list);
+            *bounds = draw_list_bounds(&instance.draw_list, instance.flip_y);
         }
         for event in instance.drain_events() {
             animation_events.write(SpineAnimationEvent {
@@ -405,15 +413,30 @@ fn rebuild_pose(instance: &mut SpineInstance, delta: f32) {
     instance.draw_list = build_draw_list_with_atlas(&instance.skeleton, &instance.atlas);
 }
 
-fn draw_list_bounds(draw_list: &spine2d::DrawList) -> SpineBounds {
+fn draw_list_bounds(draw_list: &spine2d::DrawList, flip_y: bool) -> SpineBounds {
     let Some(first) = draw_list.vertices.first() else {
         return SpineBounds::new(Vec2::ZERO, Vec2::ZERO);
     };
-    let mut min = Vec2::new(first.position[0], first.position[1]);
+    let first_position = Vec2::new(first.position[0], first.position[1]);
+    let mut min = Vec2::new(
+        first_position.x,
+        if flip_y {
+            -first_position.y
+        } else {
+            first_position.y
+        },
+    );
     let mut max = min;
 
     for vertex in draw_list.vertices.iter().skip(1) {
-        let position = Vec2::new(vertex.position[0], vertex.position[1]);
+        let position = Vec2::new(
+            vertex.position[0],
+            if flip_y {
+                -vertex.position[1]
+            } else {
+                vertex.position[1]
+            },
+        );
         min = min.min(position);
         max = max.max(position);
     }
@@ -746,9 +769,54 @@ mod tests {
         };
 
         assert_eq!(
-            draw_list_bounds(&draw_list),
+            draw_list_bounds(&draw_list, false),
             SpineBounds::new(Vec2::new(1.0, 2.0), Vec2::new(4.0, 5.0))
         );
+    }
+
+    #[test]
+    fn draw_list_bounds_flip_y_when_requested() {
+        let draw_list = spine2d::DrawList {
+            vertices: vec![
+                spine2d::Vertex {
+                    position: [1.0, 2.0],
+                    uv: [0.0, 0.0],
+                    color: [1.0; 4],
+                    dark_color: [0.0; 4],
+                },
+                spine2d::Vertex {
+                    position: [4.0, 5.0],
+                    uv: [1.0, 1.0],
+                    color: [1.0; 4],
+                    dark_color: [0.0; 4],
+                },
+            ],
+            indices: vec![0, 1],
+            draws: Vec::new(),
+        };
+
+        assert_eq!(
+            draw_list_bounds(&draw_list, true),
+            SpineBounds::new(Vec2::new(1.0, -5.0), Vec2::new(4.0, -2.0))
+        );
+    }
+
+    #[test]
+    fn spawn_copies_flip_y_into_runtime_instance() {
+        let mut app = app_with_lifecycle_systems();
+        let (skeleton, atlas) = demo_handles(&mut app);
+
+        let entity = app
+            .world_mut()
+            .spawn((Spine::new(skeleton, atlas), SpineFlipY(true)))
+            .id();
+
+        app.update();
+
+        let key = *app.world().get::<SpineInstanceKey>(entity).unwrap();
+        let spine_world = app.world().non_send_resource::<SpineWorld>();
+        let instance = spine_world.get(key.0).unwrap();
+        assert!(instance.flip_y);
     }
 
     #[test]
