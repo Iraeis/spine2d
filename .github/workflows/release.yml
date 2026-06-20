@@ -69,6 +69,9 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
+      - name: Install Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++ pkg-config libx11-dev libasound2-dev libudev-dev libxkbcommon-x11-0 libwayland-dev libxkbcommon-dev
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
