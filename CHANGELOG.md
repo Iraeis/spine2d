@@ -9,7 +9,7 @@ Version numbers follow SemVer, but the public API is expected to change rapidly 
 
 ## 0.3.0
 
-- Bevy: upgrade `spine2d-bevy` to `bevy 0.19.0` and make it publish alongside the core crates.
+- Bevy: upgrade `spine2d-bevy` to `bevy 0.19.0` and make it publish alongside the core crates. The backend itself landed in PR #2 from @Iraeis.
 - Runtime: refresh the Spine 4.3 baseline and merge the latest parity fixes.
 - Tooling: raise the workspace MSRV to `1.95`, fix the remaining `clippy -D warnings` issues, and upgrade GitHub Actions.
 

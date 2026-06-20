@@ -7,9 +7,7 @@ Experimental, pure Rust runtime for Spine 4.3 (unofficial).
 ## Important notice
 
 - This project is **unofficial** and is **not affiliated with Esoteric Software**.
-- This is a **pure Rust runtime**, not an FFI binding to the official `spine-c` / `spine-cpp` runtimes.
-  Compatibility and behavioural parity are an explicit goal, but you should treat this as an
-  experimental implementation and manage the integration risk accordingly.
+- This is a **pure Rust runtime**, not an FFI binding to the official `spine-c` / `spine-cpp` runtimes. Compatibility and behavioural parity are an explicit goal, but you should treat this as an experimental implementation and manage the integration risk accordingly.
 - If you need “official runtime parity + support” today, use the official runtimes (or a binding to them).
 
 ## Goals
@@ -35,15 +33,13 @@ Experimental, pure Rust runtime for Spine 4.3 (unofficial).
 ## Assets / redistribution
 
 - This repository does **not** ship official Spine example exports by default.
-- Local dev scripts can download `spine-runtimes` and import example exports into `assets/` for testing/demos.
-  Make sure you comply with the Spine license terms for your usage and redistribution.
+- Local dev scripts can download `spine-runtimes` and import example exports into `assets/` for testing/demos. Make sure you comply with the Spine license terms for your usage and redistribution.
   - Import examples locally: `python3 ./scripts/prepare_spine_runtimes_web_assets.py --scope tests`
 
 
 ## Optional upstream smoke tests (local data)
 
-Some smoke tests can parse official exported example JSON files from the upstream `spine-runtimes` repository.
-These files are not committed here by default.
+Some smoke tests can parse official exported example JSON files from the upstream `spine-runtimes` repository. These files are not committed here by default.
 
 - Fetch + import: `python3 ./scripts/fetch_spine_runtimes_examples.py --mode json --scope tests`
 - Import from an existing checkout: `./scripts/import_spine_runtimes_examples.zsh --mode json --scope tests`
@@ -55,9 +51,7 @@ These files are not committed here by default.
 ### wgpu demo (native)
 
 - Minimal UV test window: `cargo run -p spine2d-wgpu --example basic --features json`
-- Render upstream example skeletons (requires importing `--mode export`):  
-  `python3 ./scripts/fetch_spine_runtimes_examples.py --mode export --scope tests`  
-  `cargo run -p spine2d-wgpu --example spine_runtimes --features json -- spineboy run --speed 1.0`
+- Render upstream example skeletons (requires importing `--mode export`): `python3 ./scripts/fetch_spine_runtimes_examples.py --mode export --scope tests`; `cargo run -p spine2d-wgpu --example spine_runtimes --features json -- spineboy run --speed 1.0`
   - Note: the demo resets the skeleton to setup pose each frame before `AnimationState::apply` to avoid accumulated constraint drift.
   - Tip: the demo has an egui top bar to switch example/animation/skin and adjust speed/margin.
 
@@ -80,17 +74,15 @@ These files are not committed here by default.
 
 ### Bevy backend
 
-The Bevy examples can run with bundled demo assets, but the interactive viewer
-needs local Spine example exports for the full example/animation/skin switcher.
-Prepare those assets first when you want to test with real upstream data:
+The Bevy integration is published as the `spine2d-bevy` crate and tracks `bevy 0.19`. Install it with `cargo add spine2d-bevy`.
+
+The Bevy examples can run with bundled demo assets, but the interactive viewer needs local Spine example exports for the full example/animation/skin switcher. Prepare those assets first when you want to test with real upstream data:
 
 ```sh
 python3 ./scripts/prepare_spine_runtimes_web_assets.py --scope tests
 ```
 
-The script writes ignored files under `assets/spine-runtimes/`, including
-`assets/spine-runtimes/web_manifest.json`. Without that manifest, the viewer
-falls back to the bundled `demo` assets.
+The script writes ignored files under `assets/spine-runtimes/`, including `assets/spine-runtimes/web_manifest.json`. Without that manifest, the viewer falls back to the bundled `demo` assets.
 
 Run the built-in Bevy examples:
 
@@ -100,11 +92,9 @@ Run the built-in Bevy examples:
 - `cargo run -p spine2d-bevy --example multi_spine`
 - `cargo run -p spine2d-bevy --example viewer`
 
-The viewer reads `assets/spine-runtimes/web_manifest.json` and lets you switch examples,
-animations, skins, playback state, speed, and camera fit from the keyboard.
+The viewer reads `assets/spine-runtimes/web_manifest.json` and lets you switch examples, animations, skins, playback state, speed, and camera fit from the keyboard.
 
-The Bevy integration is centered on a public `Spine` component plus optional
-runtime control components:
+The Bevy integration is centered on a public `Spine` component plus optional runtime control components:
 
 ```rust
 use bevy::prelude::*;
@@ -126,26 +116,11 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>) {
 }
 ```
 
-Add `SpineAnimation` or `SpineSkin` only when you want component-driven runtime
-control after spawn. Use `SpineFlipY(true)` when your project uses a Y-down
-space and you want the backend to mirror Spine geometry for you. Gameplay
-systems can also write `SpineAnimationCommand` messages to set, queue, or clear
-track animations without accessing internal runtime handles. Animation
-lifecycle and custom Spine timeline events are published as
-`SpineAnimationEvent` messages.
+Add `SpineAnimation` or `SpineSkin` only when you want component-driven runtime control after spawn. Use `SpineFlipY(true)` when your project uses a Y-down space and you want the backend to mirror Spine geometry for you. Gameplay systems can also write `SpineAnimationCommand` messages to set, queue, or clear track animations without accessing internal runtime handles. Animation lifecycle and custom Spine timeline events are published as `SpineAnimationEvent` messages.
 
-Use the public `SpineReady` marker or `SpineLifecycleEvent` messages to observe
-when an entity has an active runtime instance. `SpineLifecycleEvent` also reports
-when that instance is released because the component was removed, the entity was
-despawned, or a skeleton/atlas asset reload invalidated the runtime.
-The backend maintains a public `SpineBounds` component with the current Bevy
-local-space bounds for camera fitting, hit areas, and gameplay queries.
+Use the public `SpineReady` marker or `SpineLifecycleEvent` messages to observe when an entity has an active runtime instance. `SpineLifecycleEvent` also reports when that instance is released because the component was removed, the entity was despawned, or a skeleton/atlas asset reload invalidated the runtime. The backend maintains a public `SpineBounds` component with the current Bevy local-space bounds for camera fitting, hit areas, and gameplay queries.
 
-Coordinate note: `spine2d-bevy` forwards Spine-local positions into Bevy
-without an implicit Y flip by default. Bevy world space is also Y-up, so the
-backend stays convention-neutral unless you opt in to `SpineFlipY(true)`. If a
-project uses Y-down or screen-space coordinates, attach `SpineFlipY(true)` to
-the entity or apply that conversion in the game's own transform/camera layer.
+Coordinate note: `spine2d-bevy` forwards Spine-local positions into Bevy without an implicit Y flip by default. Bevy world space is also Y-up, so the backend stays convention-neutral unless you opt in to `SpineFlipY(true)`. If a project uses Y-down or screen-space coordinates, attach `SpineFlipY(true)` to the entity or apply that conversion in the game's own transform/camera layer.
 
 ## License
 
