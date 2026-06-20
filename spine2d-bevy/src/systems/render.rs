@@ -163,8 +163,8 @@ pub fn render_spines(
         }
 
         for (draw, mesh_handle) in draw_list.draws.iter().zip(mesh_child_handles.iter()) {
-            if let Some(mesh) = render_assets.meshes.get_mut(mesh_handle) {
-                write_mesh_data(mesh, draw_list, draw, instance.flip_y);
+            if let Some(mut mesh) = render_assets.meshes.get_mut(mesh_handle) {
+                write_mesh_data(&mut mesh, draw_list, draw, instance.flip_y);
             }
         }
     }
