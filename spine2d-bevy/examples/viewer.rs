@@ -115,7 +115,7 @@ fn setup(mut commands: Commands, asset_server: Res<AssetServer>, state: Res<View
     commands.spawn((
         Text::new("Loading Spine viewer..."),
         TextFont {
-            font_size: 15.0,
+            font_size: FontSize::Px(15.0),
             ..default()
         },
         TextColor(Color::srgb(0.88, 0.9, 0.92)),
@@ -490,7 +490,7 @@ fn auto_skin<'a>(example: &ExampleEntry, asset: &'a SpineSkeletonAsset) -> Optio
                     let attachment_count = skin
                         .attachments
                         .iter()
-                        .map(std::collections::HashMap::len)
+                        .map(|attachment| attachment.len())
                         .sum::<usize>();
                     (attachment_count > 0).then_some((name.as_str(), attachment_count))
                 })
