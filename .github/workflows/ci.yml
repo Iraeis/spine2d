@@ -49,3 +49,6 @@ jobs:
 
       - name: Test (parsing/runtime features)
         run: cargo test -p spine2d --features json,binary,glam
+
+      - name: Check (spine2d-bevy)
+        run: cargo check -p spine2d-bevy

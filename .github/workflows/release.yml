@@ -108,30 +108,41 @@ jobs:
       - name: Cache dependencies
         uses: Swatinem/rust-cache@v2
 
-      - name: Publish spine2d
-        run: cargo publish -p spine2d --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"
+      - name: Install Linux dependencies
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends g++ pkg-config libx11-dev libasound2-dev libudev-dev libxkbcommon-x11-0 libwayland-dev libxkbcommon-dev
 
-      - name: Publish spine2d-wgpu
+      - name: Publish crates
+        shell: bash
         run: |
-          for i in 1 2 3 4 5 6 7 8 9 10; do
-            if cargo publish -p spine2d-wgpu --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"; then
-              exit 0
-            fi
-            echo "spine2d-wgpu publish failed (attempt $i), waiting for crates.io index..."
-            sleep 30
-          done
-          exit 1
+          set -euo pipefail
 
-      - name: Publish spine2d-bevy
-        run: |
-          for i in 1 2 3 4 5 6 7 8 9 10; do
-            if cargo publish -p spine2d-bevy --token "${{ secrets.CARGO_REGISTRY_TOKEN }}"; then
-              exit 0
-            fi
-            echo "spine2d-bevy publish failed (attempt $i), waiting for crates.io index..."
-            sleep 30
-          done
-          exit 1
+          publish_crate() {
+            local package="$1"
+            local attempt output
+
+            for attempt in 1 2 3 4 5 6 7 8 9 10; do
+              if output="$(cargo publish -p "$package" --token "${{ secrets.CARGO_REGISTRY_TOKEN }}" 2>&1)"; then
+                printf '%s\n' "$output"
+                return 0
+              fi
+
+              printf '%s\n' "$output"
+
+              if printf '%s\n' "$output" | grep -Eqi 'already (uploaded|published|exists)|is already uploaded'; then
+                echo "$package is already published; skipping."
+                return 0
+              fi
+
+              echo "$package publish failed (attempt $attempt), waiting for crates.io index..."
+              sleep 30
+            done
+
+            return 1
+          }
+
+          publish_crate spine2d
+          publish_crate spine2d-wgpu
+          publish_crate spine2d-bevy
 
   github-release:
     name: Create GitHub release
