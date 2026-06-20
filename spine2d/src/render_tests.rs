@@ -92,6 +92,42 @@ fn build_draw_list_batches_draws_by_texture_path() {
 }
 
 #[test]
+fn build_draw_list_splits_draws_by_vertex_color() {
+    let data = SkeletonData::from_json_str(
+        r#"
+{
+  "skeleton": { "spine": "4.3.00" },
+  "bones": [ { "name": "root" } ],
+  "slots": [
+    { "name": "slot0", "bone": "root", "attachment": "a", "color": "ffffffff" },
+    { "name": "slot1", "bone": "root", "attachment": "b", "color": "808080ff" }
+  ],
+  "skins": {
+    "default": {
+      "slot0": { "a": { "type": "region", "path": "page.png", "width": 2, "height": 2 } },
+      "slot1": { "b": { "type": "region", "path": "page.png", "width": 2, "height": 2 } }
+    }
+  },
+  "animations": {}
+}
+"#,
+    )
+    .unwrap();
+    let mut skeleton = crate::Skeleton::new(data);
+    skeleton.set_to_setup_pose();
+    skeleton.update_world_transform();
+
+    let draw_list = build_draw_list(&skeleton);
+    assert_eq!(draw_list.draws.len(), 2);
+    assert_eq!(draw_list.draws[0].texture_path, "page.png");
+    assert_eq!(draw_list.draws[0].first_index, 0);
+    assert_eq!(draw_list.draws[0].index_count, 6);
+    assert_eq!(draw_list.draws[1].texture_path, "page.png");
+    assert_eq!(draw_list.draws[1].first_index, 6);
+    assert_eq!(draw_list.draws[1].index_count, 6);
+}
+
+#[test]
 fn build_draw_list_with_atlas_sets_uv_and_page_texture() {
     let data = SkeletonData::from_json_str(
         r#"
