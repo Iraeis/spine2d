@@ -733,15 +733,13 @@ fn main() {
             json!(transform_constraint_data),
         );
     }
-    if let Some(slot_name) = dump_slot_vertices.as_deref() {
-        if let Some(slot_index) = skeleton.data.slots.iter().position(|s| s.name == slot_name) {
-            if let Some(world_vertices) = skeleton.slot_vertex_attachment_world_vertices(slot_index)
-            {
-                debug_map.insert("slot".to_string(), json!(slot_name));
-                debug_map.insert("slotIndex".to_string(), json!(slot_index as i32));
-                debug_map.insert("worldVertices".to_string(), json!(world_vertices));
-            }
-        }
+    if let Some(slot_name) = dump_slot_vertices.as_deref()
+        && let Some(slot_index) = skeleton.data.slots.iter().position(|s| s.name == slot_name)
+        && let Some(world_vertices) = skeleton.slot_vertex_attachment_world_vertices(slot_index)
+    {
+        debug_map.insert("slot".to_string(), json!(slot_name));
+        debug_map.insert("slotIndex".to_string(), json!(slot_index as i32));
+        debug_map.insert("worldVertices".to_string(), json!(world_vertices));
     }
 
     if let Some(animation_name) = dump_animation_data_name.as_deref() {

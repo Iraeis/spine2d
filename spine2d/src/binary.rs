@@ -840,10 +840,10 @@ impl crate::SkeletonData {
         let _ = input.read_i32_be()?;
 
         let spine_version = input.read_string()?;
-        if let Some(v) = spine_version.as_deref() {
-            if !v.is_empty() {
-                validate_spine_version(v)?;
-            }
+        if let Some(v) = spine_version.as_deref()
+            && !v.is_empty()
+        {
+            validate_spine_version(v)?;
         }
 
         // x, y, width, height, referenceScale
@@ -1644,10 +1644,10 @@ impl crate::SkeletonData {
                     else {
                         continue;
                     };
-                    if let AttachmentData::Mesh(parent_mesh) = parent_attachment {
-                        if !parent_mesh.timeline_slots.contains(&pending.slot_index) {
-                            parent_mesh.timeline_slots.push(pending.slot_index);
-                        }
+                    if let AttachmentData::Mesh(parent_mesh) = parent_attachment
+                        && !parent_mesh.timeline_slots.contains(&pending.slot_index)
+                    {
+                        parent_mesh.timeline_slots.push(pending.slot_index);
                     }
                 }
                 resolved_any = true;

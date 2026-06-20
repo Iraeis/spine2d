@@ -292,7 +292,7 @@ impl SkeletonClipper {
         if !self.clipping_polygons.is_empty() {
             return false;
         }
-        if polygon_vertices.len() < 6 || polygon_vertices.len() % 2 != 0 {
+        if polygon_vertices.len() < 6 || !polygon_vertices.len().is_multiple_of(2) {
             return false;
         }
 

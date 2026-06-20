@@ -1591,7 +1591,7 @@ impl AnimationState {
         let track_index = self.entry(entry_id).map(|e| e.track_index).unwrap_or(0);
         let special_case = track_index == 0 && alpha == 1.0 && direction == MixDirection::In;
 
-        let kinds = animation_timeline_order(&animation).to_vec();
+        let kinds = animation_timeline_order(animation).to_vec();
         let mut timeline_mode = self
             .entry(entry_id)
             .map(|e| e.timeline_mode.clone())
@@ -2206,16 +2206,16 @@ impl AnimationState {
                         );
                     }
                     TimelineKind::DrawOrder => {
-                        if let Some(timeline) = from_animation.draw_order_timeline.as_ref() {
-                            if let Some(out) = draw_order_timeline_out(draw_order, mode.from) {
-                                apply_draw_order(
-                                    timeline,
-                                    skeleton,
-                                    from_apply_time,
-                                    mode.from == TimelineMode::Current,
-                                    out,
-                                );
-                            }
+                        if let Some(timeline) = from_animation.draw_order_timeline.as_ref()
+                            && let Some(out) = draw_order_timeline_out(draw_order, mode.from)
+                        {
+                            apply_draw_order(
+                                timeline,
+                                skeleton,
+                                from_apply_time,
+                                mode.from == TimelineMode::Current,
+                                out,
+                            );
                         }
                     }
                     TimelineKind::DrawOrderFolder(ti) => {
@@ -2358,10 +2358,10 @@ impl AnimationState {
     }
 
     fn restore_entry_listener(&mut self, id: EntryId, listener: Box<dyn TrackEntryListener>) {
-        if let Some(entry) = self.entry_mut(id) {
-            if entry.listener.is_none() {
-                entry.listener = Some(listener);
-            }
+        if let Some(entry) = self.entry_mut(id)
+            && entry.listener.is_none()
+        {
+            entry.listener = Some(listener);
         }
     }
 
@@ -2401,10 +2401,10 @@ impl AnimationState {
                 if let Some(to_entry) = self.entry_mut(to) {
                     to_entry.mixing_from = next_from;
                 }
-                if let Some(next_from) = next_from {
-                    if let Some(entry) = self.entry_mut(next_from) {
-                        entry.mixing_to = Some(to);
-                    }
+                if let Some(next_from) = next_from
+                    && let Some(entry) = self.entry_mut(next_from)
+                {
+                    entry.mixing_to = Some(to);
                 }
                 if from_total_alpha.abs() <= TIME_EPSILON {
                     let mut keep_id = Some(to);
@@ -2470,27 +2470,28 @@ impl AnimationState {
         };
 
         let mut events = Vec::new();
-        if events_enabled && can_issue_events {
-            if let Some(timeline) = &entry.animation.event_timeline {
-                if reverse {
-                    collect_reverse_events(
-                        timeline,
-                        animation_last,
-                        animation_time,
-                        animation_duration,
-                        &mut events,
-                    );
-                } else {
-                    collect_events(
-                        timeline,
-                        animation_last,
-                        animation_time,
-                        entry.looped,
-                        animation_start,
-                        animation_end,
-                        &mut events,
-                    );
-                }
+        if events_enabled
+            && can_issue_events
+            && let Some(timeline) = &entry.animation.event_timeline
+        {
+            if reverse {
+                collect_reverse_events(
+                    timeline,
+                    animation_last,
+                    animation_time,
+                    animation_duration,
+                    &mut events,
+                );
+            } else {
+                collect_events(
+                    timeline,
+                    animation_last,
+                    animation_time,
+                    entry.looped,
+                    animation_start,
+                    animation_end,
+                    &mut events,
+                );
             }
         }
 

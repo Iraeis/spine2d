@@ -2398,10 +2398,10 @@ pub(crate) fn apply_attachment(
                 );
             }
         }
-        if let Some(slot) = skeleton.slots.get_mut(timeline.slot_index) {
-            if slot.attachment_state <= unkeyed_state {
-                slot.attachment_state = unkeyed_state + ANIMATION_STATE_SETUP;
-            }
+        if let Some(slot) = skeleton.slots.get_mut(timeline.slot_index)
+            && slot.attachment_state <= unkeyed_state
+        {
+            slot.attachment_state = unkeyed_state + ANIMATION_STATE_SETUP;
         }
         return;
     }
@@ -2418,10 +2418,10 @@ pub(crate) fn apply_attachment(
         attachments,
         unkeyed_state,
     );
-    if let Some(slot) = skeleton.slots.get_mut(timeline.slot_index) {
-        if slot.attachment_state <= unkeyed_state {
-            slot.attachment_state = unkeyed_state + ANIMATION_STATE_SETUP;
-        }
+    if let Some(slot) = skeleton.slots.get_mut(timeline.slot_index)
+        && slot.attachment_state <= unkeyed_state
+    {
+        slot.attachment_state = unkeyed_state + ANIMATION_STATE_SETUP;
     }
 }
 
@@ -2432,22 +2432,21 @@ fn resolve_attachment_source_skin<'a>(
 ) -> Option<&'a str> {
     let skin_name = skeleton.skin.as_deref();
     if let Some(skin_name) = skin_name {
-        if let Some(skin) = skeleton.data.skin(skin_name) {
-            if skin.attachment(slot_index, name).is_some() {
-                return Some(skin_name);
-            }
+        if let Some(skin) = skeleton.data.skin(skin_name)
+            && skin.attachment(slot_index, name).is_some()
+        {
+            return Some(skin_name);
         }
-        if skin_name != "default" {
-            if let Some(default_skin) = skeleton.data.skin("default") {
-                if default_skin.attachment(slot_index, name).is_some() {
-                    return Some("default");
-                }
-            }
-        }
-    } else if let Some(default_skin) = skeleton.data.skin("default") {
-        if default_skin.attachment(slot_index, name).is_some() {
+        if skin_name != "default"
+            && let Some(default_skin) = skeleton.data.skin("default")
+            && default_skin.attachment(slot_index, name).is_some()
+        {
             return Some("default");
         }
+    } else if let Some(default_skin) = skeleton.data.skin("default")
+        && default_skin.attachment(slot_index, name).is_some()
+    {
+        return Some("default");
     }
     None
 }
@@ -3769,8 +3768,7 @@ pub(crate) fn apply_scale_x_with(
         from,
         add,
         direction,
-        current,
-        setup,
+        (current, setup),
     );
 }
 
@@ -3896,8 +3894,7 @@ pub(crate) fn apply_scale_y_with(
         from,
         add,
         direction,
-        current,
-        setup,
+        (current, setup),
     );
 }
 
@@ -3908,9 +3905,9 @@ fn scale_value(
     from: MixFrom,
     add: bool,
     direction: MixDirection,
-    current: f32,
-    setup: f32,
+    current_and_setup: (f32, f32),
 ) -> f32 {
+    let (current, setup) = current_and_setup;
     if time < frames[0].time {
         return before_first_absolute(from, alpha, current, setup);
     }

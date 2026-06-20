@@ -1404,22 +1404,21 @@ impl Skeleton {
     ) -> Option<&crate::AttachmentData> {
         let skin_name = self.skin.as_deref();
         if let Some(skin_name) = skin_name {
-            if let Some(skin) = self.data.skin(skin_name) {
-                if let Some(att) = skin.attachment(slot_index, attachment_name) {
-                    return Some(att);
-                }
-            }
-            if skin_name != "default" {
-                if let Some(default_skin) = self.data.skin("default") {
-                    if let Some(att) = default_skin.attachment(slot_index, attachment_name) {
-                        return Some(att);
-                    }
-                }
-            }
-        } else if let Some(default_skin) = self.data.skin("default") {
-            if let Some(att) = default_skin.attachment(slot_index, attachment_name) {
+            if let Some(skin) = self.data.skin(skin_name)
+                && let Some(att) = skin.attachment(slot_index, attachment_name)
+            {
                 return Some(att);
             }
+            if skin_name != "default"
+                && let Some(default_skin) = self.data.skin("default")
+                && let Some(att) = default_skin.attachment(slot_index, attachment_name)
+            {
+                return Some(att);
+            }
+        } else if let Some(default_skin) = self.data.skin("default")
+            && let Some(att) = default_skin.attachment(slot_index, attachment_name)
+        {
+            return Some(att);
         }
 
         None
@@ -1429,12 +1428,11 @@ impl Skeleton {
         let slot = self.slots.get(slot_index)?;
         let key = slot.attachment.as_deref()?;
 
-        if let Some(source_skin) = slot.attachment_skin.as_deref() {
-            if let Some(skin) = self.data.skin(source_skin) {
-                if let Some(att) = skin.attachment(slot_index, key) {
-                    return Some(att);
-                }
-            }
+        if let Some(source_skin) = slot.attachment_skin.as_deref()
+            && let Some(skin) = self.data.skin(source_skin)
+            && let Some(att) = skin.attachment(slot_index, key)
+        {
+            return Some(att);
         }
 
         self.attachment(slot_index, key)
@@ -1982,10 +1980,8 @@ impl Skeleton {
                             .map(|b| b.length)
                             .unwrap_or(0.0);
                         if setup_length < EPSILON {
-                            if scale {
-                                if let Some(out) = lengths.get_mut(i) {
-                                    *out = 0.0;
-                                }
+                            if scale && let Some(out) = lengths.get_mut(i) {
+                                *out = 0.0;
                             }
                             i += 1;
                             spaces[i] = spacing;
@@ -1998,10 +1994,8 @@ impl Skeleton {
                         let x = setup_length * bone.a;
                         let y = setup_length * bone.c;
                         let length = (x * x + y * y).sqrt();
-                        if scale {
-                            if let Some(out) = lengths.get_mut(i) {
-                                *out = length;
-                            }
+                        if scale && let Some(out) = lengths.get_mut(i) {
+                            *out = length;
                         }
                         i += 1;
                         spaces[i] = length;
@@ -2030,10 +2024,8 @@ impl Skeleton {
                             .map(|b| b.length)
                             .unwrap_or(0.0);
                         if setup_length < EPSILON {
-                            if scale {
-                                if let Some(out) = lengths.get_mut(i) {
-                                    *out = 0.0;
-                                }
+                            if scale && let Some(out) = lengths.get_mut(i) {
+                                *out = 0.0;
                             }
                             i += 1;
                             spaces[i] = spacing;
@@ -2046,10 +2038,8 @@ impl Skeleton {
                         let x = setup_length * bone.a;
                         let y = setup_length * bone.c;
                         let length = (x * x + y * y).sqrt();
-                        if scale {
-                            if let Some(out) = lengths.get_mut(i) {
-                                *out = length;
-                            }
+                        if scale && let Some(out) = lengths.get_mut(i) {
+                            *out = length;
                         }
                         i += 1;
                         spaces[i] = (if length_spacing {
@@ -4668,10 +4658,10 @@ fn compute_attachment_world_vertices(
 fn build_bone_children_indices(bones: &[Bone]) -> Vec<Vec<usize>> {
     let mut children = vec![Vec::<usize>::new(); bones.len()];
     for (index, bone) in bones.iter().enumerate() {
-        if let Some(parent) = bone.parent {
-            if parent < children.len() {
-                children[parent].push(index);
-            }
+        if let Some(parent) = bone.parent
+            && parent < children.len()
+        {
+            children[parent].push(index);
         }
     }
     children

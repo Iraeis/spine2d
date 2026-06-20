@@ -1533,10 +1533,10 @@ impl SkeletonData {
                         else {
                             continue;
                         };
-                        if let AttachmentData::Mesh(parent_mesh) = parent_attachment {
-                            if !parent_mesh.timeline_slots.contains(&pending.slot_index) {
-                                parent_mesh.timeline_slots.push(pending.slot_index);
-                            }
+                        if let AttachmentData::Mesh(parent_mesh) = parent_attachment
+                            && !parent_mesh.timeline_slots.contains(&pending.slot_index)
+                        {
+                            parent_mesh.timeline_slots.push(pending.slot_index);
                         }
                     }
                     resolved_any = true;
