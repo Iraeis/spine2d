@@ -13,10 +13,52 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from upstream_baseline import load_upstream_baseline
+
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 TESTS_RS = ROOT_DIR / "spine2d" / "src" / "runtime" / "oracle_scenario_parity_tests.rs"
 ORACLE_RUNNER = ROOT_DIR / "scripts" / "run_spine_cpp_lite_oracle.zsh"
+UPSTREAM_BASELINE = load_upstream_baseline()
+
+
+def read_source_commit(source: Path) -> Optional[str]:
+    if not source.is_file():
+        return None
+    for line in source.read_text(encoding="utf-8").splitlines():
+        if line.startswith("Commit:") or line.startswith("TargetCommit:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def git_head(path: Path) -> Optional[str]:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(path), "rev-parse", "HEAD"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+
+def examples_commit(examples_root: Path) -> Optional[str]:
+    repo_root = examples_root.parent
+    return read_source_commit(repo_root / "SOURCE.txt") or git_head(repo_root)
+
+
+def assert_expected_examples_commit(examples_root: Path) -> str:
+    commit = examples_commit(examples_root)
+    if commit != UPSTREAM_BASELINE.target_commit:
+        raise SystemExit(
+            "Upstream Spine examples do not match the pinned baseline.\n"
+            f"  examples: {examples_root}\n"
+            f"  expected: {UPSTREAM_BASELINE.target_commit}\n"
+            f"  actual:   {commit or 'unknown'}\n"
+            f"Run `python3 ./scripts/prepare_spine_runtimes_web_assets.py --scope tests --rev {UPSTREAM_BASELINE.upstream_ref}` "
+            "or set SPINE2D_UPSTREAM_EXAMPLES_DIR to a matching checkout."
+        )
+    return commit
 
 
 def find_examples_root() -> Path:
@@ -24,6 +66,7 @@ def find_examples_root() -> Path:
     if env:
         p = Path(env)
         if p.is_dir():
+            assert_expected_examples_commit(p)
             return p
 
     candidates = [
@@ -31,11 +74,25 @@ def find_examples_root() -> Path:
         ROOT_DIR / "third_party" / "spine-runtimes" / "examples",
         ROOT_DIR / ".cache" / "spine-runtimes" / "examples",
     ]
+    mismatches = []
     for p in candidates:
-        if p.is_dir():
+        if not p.is_dir():
+            continue
+        commit = examples_commit(p)
+        if commit == UPSTREAM_BASELINE.target_commit:
             return p
+        mismatches.append((p, commit or "unknown"))
+    if mismatches:
+        details = "\n".join(f"  {p}: {commit}" for p, commit in mismatches)
+        raise SystemExit(
+            "Found upstream Spine examples, but none match the pinned baseline.\n"
+            f"Expected: {UPSTREAM_BASELINE.target_commit}\n"
+            f"{details}\n"
+            f"Run `python3 ./scripts/prepare_spine_runtimes_web_assets.py --scope tests --rev {UPSTREAM_BASELINE.upstream_ref}`."
+        )
     raise SystemExit(
-        "Missing upstream Spine examples. Run `python3 ./scripts/prepare_spine_runtimes_web_assets.py --scope tests --rev 4.3-beta` "
+        "Missing upstream Spine examples. Run "
+        f"`python3 ./scripts/prepare_spine_runtimes_web_assets.py --scope tests --rev {UPSTREAM_BASELINE.upstream_ref}` "
         "or set SPINE2D_UPSTREAM_EXAMPLES_DIR."
     )
 
@@ -177,14 +234,6 @@ def parse_bool(token: str) -> str:
     raise ValueError(f"invalid bool: {token}")
 
 
-def parse_mix_blend(variant: str) -> str:
-    v = variant.strip()
-    mapping = {"Setup": "setup", "First": "first", "Replace": "replace", "Add": "add"}
-    if v not in mapping:
-        raise ValueError(f"invalid MixBlend: {v}")
-    return mapping[v]
-
-
 def parse_physics_mode(variant: str) -> str:
     v = variant.strip()
     mapping = {"None": "none", "Reset": "reset", "Update": "update", "Pose": "pose"}
@@ -241,8 +290,8 @@ def parse_commands_no_loops(body: str, env: Dict[str, float]) -> List[str]:
 
     # TrackEntry / last-entry mutations.
     add(
-        r"\.\s*set_mix_blend\s*\(\s*&mut\s+state\s*,\s*crate::MixBlend::([A-Za-z]+)\s*\)",
-        lambda m: ["--entry-mix-blend", parse_mix_blend(m.group(1))],
+        r"\.\s*set_additive\s*\(\s*&mut\s+state\s*,\s*(true|false)\s*\)",
+        lambda m: ["--entry-additive", parse_bool(m.group(1))],
     )
     add(
         r"\.\s*set_alpha\s*\(\s*&mut\s+state\s*,\s*([^\)]+?)\s*\)",
@@ -272,10 +321,6 @@ def parse_commands_no_loops(body: str, env: Dict[str, float]) -> List[str]:
             "--entry-mix-draw-order-threshold",
             value_to_string(parse_value(m.group(1), env)),
         ],
-    )
-    add(
-        r"\.\s*set_hold_previous\s*\(\s*&mut\s+state\s*,\s*(true|false)\s*\)",
-        lambda m: ["--entry-hold-previous", parse_bool(m.group(1))],
     )
     add(
         r"\.\s*set_reverse\s*\(\s*&mut\s+state\s*,\s*(true|false)\s*\)",
@@ -460,40 +505,23 @@ def run_oracle(atlas: Path, skeleton: Path, commands: List[str]) -> str:
     return out + "\n"
 
 
-def load_upstream_commit() -> Optional[str]:
-    p = ROOT_DIR / "assets" / "spine-runtimes" / "SOURCE.txt"
-    if not p.is_file():
-        return None
-    for line in p.read_text(encoding="utf-8").splitlines():
-        if line.startswith("Commit:"):
-            return line.split(":", 1)[1].strip()
-    return None
-
-
-def update_golden_source(status: str, commit: Optional[str]) -> None:
+def update_golden_source(status: str, commit: str) -> None:
     p = ROOT_DIR / "spine2d" / "tests" / "golden" / "SOURCE.txt"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    lines = []
-    if p.is_file():
-        lines = p.read_text(encoding="utf-8").splitlines()
-    else:
-        lines = [
-            "Source: https://github.com/EsotericSoftware/spine-runtimes",
-            "Branch: 4.3-beta",
+    lines = [
+            f"Source: {UPSTREAM_BASELINE.repo_url}",
+            f"TargetVersion: {UPSTREAM_BASELINE.target_version}",
+            f"UpstreamRef: {UPSTREAM_BASELINE.upstream_ref}",
+            f"TargetCommit: {UPSTREAM_BASELINE.target_commit}",
+            f"RecordedFromCommit: {commit}",
+            f"RecordedAtUTC: {now}",
+            f"Status: {status}",
+            "Notes:",
+            "  This directory contains golden dumps produced by the C++ oracle (built from spine-c + spine-cpp):",
+            "  - Pose dumps: `oracle_scenarios/` and `oracle_scenarios_skel/` (recorded by `scripts/record_oracle_goldens.py`)",
+            "  - Render dumps: `render_oracle_scenarios/` and `render_oracle_scenarios_skel/` (recorded by `scripts/record_oracle_render_goldens.py`)",
+            "  Re-record when the upstream baseline commit changes.",
         ]
-
-    def upsert(prefix: str, value: str):
-        nonlocal lines
-        for i, line in enumerate(lines):
-            if line.startswith(prefix):
-                lines[i] = f"{prefix}{value}"
-                return
-        lines.append(f"{prefix}{value}")
-
-    if commit:
-        upsert("TargetCommit: ", commit)
-    upsert("RecordedAtUTC: ", now)
-    upsert("Status: ", status)
     p.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -512,6 +540,7 @@ def main() -> int:
         raise SystemExit(f"Missing: {ORACLE_RUNNER}")
 
     examples_root = find_examples_root()
+    commit = assert_expected_examples_commit(examples_root)
     scenarios = extract_scenarios(TESTS_RS)
     scenarios.sort(key=lambda s: (s.golden_is_skel, s.golden_file, s.skeleton_rel))
 
@@ -532,7 +561,6 @@ def main() -> int:
         print("No scenarios selected.")
         return 0
 
-    commit = load_upstream_commit()
     if not args.dry_run:
         update_golden_source("STALE (recording in progress)", commit)
 

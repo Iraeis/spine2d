@@ -227,14 +227,19 @@ fn append_draw_list_internal(out: &mut DrawList, skeleton: &Skeleton, atlas: Opt
                             base,
                         ]);
 
-                        if let Some(last) = out.draws.last_mut() {
+                        if let Some(last) = out.draws.last() {
                             let expected = last.first_index + last.index_count;
                             if last.texture_path == texture_path
                                 && last.blend == blend
                                 && last.premultiplied_alpha == premultiplied_alpha
                                 && expected == first_index
+                                && draw_color_matches(out, last, color, dark_color)
+                                && last.index_count + 6 < u16::MAX as usize
                             {
-                                last.index_count += 6;
+                                out.draws
+                                    .last_mut()
+                                    .expect("last draw exists after immutable last check")
+                                    .index_count += 6;
                                 break 'process_slot;
                             }
                         }
@@ -275,7 +280,7 @@ fn append_draw_list_internal(out: &mut DrawList, skeleton: &Skeleton, atlas: Opt
                             });
                         }
 
-                        append_indexed_u16(
+                        append_indexed_u16_unbatched(
                             out,
                             &texture_path,
                             blend,
@@ -320,7 +325,7 @@ fn append_draw_list_internal(out: &mut DrawList, skeleton: &Skeleton, atlas: Opt
                         polygon_flat.push(p[1]);
                     }
 
-                    if clipper.clip_start(&polygon_flat) {
+                    if clipper.clip_start(&polygon_flat, clip.convex, clip.inverse) {
                         clip_end_slot = clip.end_slot;
                     }
                 }
@@ -441,14 +446,19 @@ fn append_draw_list_internal(out: &mut DrawList, skeleton: &Skeleton, atlas: Opt
                             out.indices.push(base + idx);
                         }
 
-                        if let Some(last) = out.draws.last_mut() {
+                        if let Some(last) = out.draws.last() {
                             let expected = last.first_index + last.index_count;
                             if last.texture_path == texture_path
                                 && last.blend == blend
                                 && last.premultiplied_alpha == premultiplied_alpha
                                 && expected == first_index
+                                && draw_color_matches(out, last, color, dark_color)
+                                && last.index_count + mesh.triangles.len() < u16::MAX as usize
                             {
-                                last.index_count += mesh.triangles.len();
+                                out.draws
+                                    .last_mut()
+                                    .expect("last draw exists after immutable last check")
+                                    .index_count += mesh.triangles.len();
                                 break 'process_slot;
                             }
                         }
@@ -502,7 +512,7 @@ fn append_draw_list_internal(out: &mut DrawList, skeleton: &Skeleton, atlas: Opt
                             });
                         }
 
-                        append_indexed_u16(
+                        append_indexed_u16_unbatched(
                             out,
                             &texture_path,
                             blend,
@@ -524,7 +534,7 @@ fn append_draw_list_internal(out: &mut DrawList, skeleton: &Skeleton, atlas: Opt
     clipper.clip_end();
 }
 
-fn append_indexed_u16(
+fn append_indexed_u16_unbatched(
     out: &mut DrawList,
     texture_path: &str,
     blend: BlendMode,
@@ -543,18 +553,6 @@ fn append_indexed_u16(
     out.indices
         .extend(indices.iter().map(|&idx| base + idx as u32));
 
-    if let Some(last) = out.draws.last_mut() {
-        let expected = last.first_index + last.index_count;
-        if last.texture_path == texture_path
-            && last.blend == blend
-            && last.premultiplied_alpha == premultiplied_alpha
-            && expected == first_index
-        {
-            last.index_count += indices.len();
-            return;
-        }
-    }
-
     out.draws.push(Draw {
         texture_path: texture_path.to_string(),
         blend,
@@ -562,6 +560,17 @@ fn append_indexed_u16(
         first_index,
         index_count: indices.len(),
     });
+}
+
+fn draw_color_matches(out: &DrawList, draw: &Draw, color: [f32; 4], dark_color: [f32; 4]) -> bool {
+    let Some(&first_vertex_index) = out.indices.get(draw.first_index) else {
+        return false;
+    };
+    let Some(first_vertex) = out.vertices.get(first_vertex_index as usize) else {
+        return false;
+    };
+
+    first_vertex.color == color && first_vertex.dark_color == dark_color
 }
 
 #[allow(clippy::too_many_arguments)]

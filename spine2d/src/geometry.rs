@@ -264,6 +264,8 @@ pub(crate) struct SkeletonClipper {
     clip_output: Vec<f32>,
     scratch: Vec<f32>,
     scratch2: Vec<f32>,
+    inverse_vertices: Vec<f32>,
+    inverse: bool,
 }
 
 impl Default for SkeletonClipper {
@@ -274,12 +276,19 @@ impl Default for SkeletonClipper {
             clip_output: Vec::new(),
             scratch: Vec::new(),
             scratch2: Vec::new(),
+            inverse_vertices: Vec::new(),
+            inverse: false,
         }
     }
 }
 
 impl SkeletonClipper {
-    pub(crate) fn clip_start(&mut self, polygon_vertices: &[f32]) -> bool {
+    pub(crate) fn clip_start(
+        &mut self,
+        polygon_vertices: &[f32],
+        convex_flag: bool,
+        inverse: bool,
+    ) -> bool {
         if !self.clipping_polygons.is_empty() {
             return false;
         }
@@ -287,20 +296,31 @@ impl SkeletonClipper {
             return false;
         }
 
+        self.inverse = inverse;
         let mut clipping_polygon: Vec<f32> = polygon_vertices.to_vec();
-        make_clockwise(&mut clipping_polygon);
+        let convex = make_clockwise(&mut clipping_polygon);
 
-        let triangles = self.triangulator.triangulate(&clipping_polygon);
-        let mut polygons = self.triangulator.decompose(&clipping_polygon, &triangles);
-        for poly in &mut polygons {
-            make_clockwise(poly);
-            if poly.len() >= 2 {
-                poly.push(poly[0]);
-                poly.push(poly[1]);
+        if convex || inverse || convex_flag {
+            if !convex {
+                make_convex(&mut clipping_polygon, &mut self.clip_output);
             }
+            if clipping_polygon.len() >= 2 {
+                clipping_polygon.push(clipping_polygon[0]);
+                clipping_polygon.push(clipping_polygon[1]);
+            }
+            self.clipping_polygons.push(clipping_polygon);
+        } else {
+            let triangles = self.triangulator.triangulate(&clipping_polygon);
+            let mut polygons = self.triangulator.decompose(&clipping_polygon, &triangles);
+            for poly in &mut polygons {
+                make_clockwise(poly);
+                if poly.len() >= 2 {
+                    poly.push(poly[0]);
+                    poly.push(poly[1]);
+                }
+            }
+            self.clipping_polygons = polygons;
         }
-
-        self.clipping_polygons = polygons;
         !self.clipping_polygons.is_empty()
     }
 
@@ -309,6 +329,8 @@ impl SkeletonClipper {
         self.clip_output.clear();
         self.scratch.clear();
         self.scratch2.clear();
+        self.inverse_vertices.clear();
+        self.inverse = false;
     }
 
     pub(crate) fn is_clipping(&self) -> bool {
@@ -332,6 +354,75 @@ impl SkeletonClipper {
         let mut clipped_triangles: Vec<u16> = Vec::new();
 
         let mut index: u16 = 0;
+
+        if self.inverse {
+            let polygon = &polygons[0];
+            for tri in triangles.chunks_exact(3) {
+                let (x1, y1, u1, v1) = read_vertex(vertices, uvs, tri[0], stride);
+                let (x2, y2, u2, v2) = read_vertex(vertices, uvs, tri[1], stride);
+                let (x3, y3, u3, v3) = read_vertex(vertices, uvs, tri[2], stride);
+
+                clip_inverse(
+                    &mut self.inverse_vertices,
+                    &mut self.clip_output,
+                    &mut self.scratch,
+                    x1,
+                    y1,
+                    x2,
+                    y2,
+                    x3,
+                    y3,
+                    polygon,
+                );
+                if self.inverse_vertices.is_empty() {
+                    continue;
+                }
+
+                let d0 = y2 - y3;
+                let d1 = x3 - x2;
+                let d2 = x1 - x3;
+                let d4 = y3 - y1;
+                let d = 1.0 / (d0 * d2 + d1 * (y1 - y3));
+
+                let mut offset = 0usize;
+                while offset < self.inverse_vertices.len() {
+                    let polygon_size = self.inverse_vertices[offset] as usize;
+                    offset += 1;
+                    let vertex_count = polygon_size / 2;
+                    let s = clipped_vertices.len();
+                    clipped_vertices.resize(s + polygon_size, 0.0);
+                    clipped_uvs.resize(s + polygon_size, 0.0);
+
+                    let mut write = s;
+                    for ii in (0..polygon_size).step_by(2) {
+                        let x = self.inverse_vertices[offset + ii];
+                        let y = self.inverse_vertices[offset + ii + 1];
+                        clipped_vertices[write] = x;
+                        clipped_vertices[write + 1] = y;
+
+                        let c0 = x - x3;
+                        let c1 = y - y3;
+                        let a = (d0 * c0 + d1 * c1) * d;
+                        let b = (d4 * c0 + d2 * c1) * d;
+                        let c = 1.0 - a - b;
+                        clipped_uvs[write] = u1 * a + u2 * b + u3 * c;
+                        clipped_uvs[write + 1] = v1 * a + v2 * b + v3 * c;
+                        write += 2;
+                    }
+
+                    clipped_triangles.reserve(3 * vertex_count.saturating_sub(2));
+                    for ii in 1..vertex_count.saturating_sub(1) {
+                        clipped_triangles.push(index);
+                        clipped_triangles.push(index + ii as u16);
+                        clipped_triangles.push(index + ii as u16 + 1);
+                    }
+                    index = index.wrapping_add(vertex_count as u16);
+                    offset += polygon_size;
+                }
+            }
+
+            return (clipped_vertices, clipped_uvs, clipped_triangles);
+        }
 
         'outer: for tri in triangles.chunks_exact(3) {
             let (x1, y1, u1, v1) = read_vertex(vertices, uvs, tri[0], stride);
@@ -435,35 +526,251 @@ fn read_vertex(vertices: &[f32], uvs: &[f32], vertex: u16, stride: usize) -> (f3
     )
 }
 
-fn make_clockwise(polygon: &mut [f32]) {
+fn make_clockwise(polygon: &mut [f32]) -> bool {
     if polygon.len() < 6 {
-        return;
+        return false;
     }
-    let vertices_length = polygon.len();
 
-    let mut area =
-        polygon[vertices_length - 2] * polygon[1] - polygon[0] * polygon[vertices_length - 1];
-    let mut i = 0usize;
-    while i < vertices_length - 3 {
-        let p1x = polygon[i];
-        let p1y = polygon[i + 1];
-        let p2x = polygon[i + 2];
-        let p2y = polygon[i + 3];
-        area += p1x * p2y - p2x * p1y;
+    let n = polygon.len();
+    let mut no_cw = true;
+    let mut no_ccw = true;
+    let mut area = 0.0;
+    let mut prev_x = polygon[n - 2];
+    let mut prev_y = polygon[n - 1];
+    let mut curr_x = polygon[0];
+    let mut curr_y = polygon[1];
+
+    let mut i = 2usize;
+    while i < n {
+        let next_x = polygon[i];
+        let next_y = polygon[i + 1];
+        area += curr_x * next_y - next_x * curr_y;
+        let cross = (curr_x - prev_x) * (next_y - curr_y) - (curr_y - prev_y) * (next_x - curr_x);
+        no_ccw &= cross <= 0.0;
+        no_cw &= cross >= 0.0;
+        prev_x = curr_x;
+        prev_y = curr_y;
+        curr_x = next_x;
+        curr_y = next_y;
         i += 2;
     }
 
-    if area < 0.0 {
+    area += curr_x * polygon[1] - polygon[0] * curr_y;
+    let cross =
+        (curr_x - prev_x) * (polygon[1] - curr_y) - (curr_y - prev_y) * (polygon[0] - curr_x);
+    no_ccw &= cross <= 0.0;
+    no_cw &= cross >= 0.0;
+
+    if area >= 0.0 {
+        let last_x = n - 2;
+        let half = n / 2;
+        let mut i = 0usize;
+        while i < half {
+            let other = last_x - i;
+            polygon.swap(i, other);
+            polygon.swap(i + 1, other + 1);
+            i += 2;
+        }
+        return no_cw;
+    }
+
+    no_ccw
+}
+
+fn make_convex(polygon: &mut Vec<f32>, scratch: &mut Vec<f32>) {
+    let n = polygon.len();
+    if n < 6 {
         return;
     }
 
-    let last_x = vertices_length - 2;
-    let n = vertices_length / 2;
-    let mut i = 0usize;
+    scratch.clear();
+    scratch.extend_from_slice(polygon);
+    let sorted = scratch;
+    let mut i = 2usize;
     while i < n {
-        let other = last_x - i;
-        polygon.swap(i, other);
-        polygon.swap(i + 1, other + 1);
+        let x = sorted[i];
+        let y = sorted[i + 1];
+        let mut p = i as isize - 2;
+        while p >= 0 {
+            let pu = p as usize;
+            if sorted[pu] < x || (sorted[pu] == x && sorted[pu + 1] <= y) {
+                break;
+            }
+            sorted[pu + 2] = sorted[pu];
+            sorted[pu + 3] = sorted[pu + 1];
+            p -= 2;
+        }
+        let insert = (p + 2) as usize;
+        sorted[insert] = x;
+        sorted[insert + 1] = y;
+        i += 2;
+    }
+
+    polygon.resize(n, 0.0);
+    polygon[0] = sorted[0];
+    polygon[1] = sorted[1];
+    polygon[2] = sorted[2];
+    polygon[3] = sorted[3];
+    let mut s = 4usize;
+    let mut i = 4usize;
+    while i < n {
+        let x = sorted[i];
+        let y = sorted[i + 1];
+        while (polygon[s - 2] - polygon[s - 4]) * (y - polygon[s - 3])
+            - (polygon[s - 1] - polygon[s - 3]) * (x - polygon[s - 4])
+            >= 0.0
+        {
+            s -= 2;
+            if s == 2 {
+                break;
+            }
+        }
+        polygon[s] = x;
+        polygon[s + 1] = y;
+        s += 2;
+        i += 2;
+    }
+
+    polygon[s] = sorted[n - 4];
+    polygon[s + 1] = sorted[n - 3];
+    let t = s;
+    s += 2;
+
+    let mut i = n as isize - 6;
+    while i >= 0 {
+        let iu = i as usize;
+        let x = sorted[iu];
+        let y = sorted[iu + 1];
+        while (polygon[s - 2] - polygon[s - 4]) * (y - polygon[s - 3])
+            - (polygon[s - 1] - polygon[s - 3]) * (x - polygon[s - 4])
+            >= 0.0
+        {
+            s -= 2;
+            if s == t {
+                break;
+            }
+        }
+        polygon[s] = x;
+        polygon[s + 1] = y;
+        s += 2;
+        i -= 2;
+    }
+
+    polygon.truncate(s.saturating_sub(2));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn clip_inverse(
+    inverse_vertices: &mut Vec<f32>,
+    clip_output: &mut Vec<f32>,
+    scratch: &mut Vec<f32>,
+    x1: f32,
+    y1: f32,
+    x2: f32,
+    y2: f32,
+    x3: f32,
+    y3: f32,
+    clipping_area: &[f32],
+) {
+    inverse_vertices.clear();
+    let clipping_vertices_last = clipping_area.len() - 4;
+
+    let (mut input, mut output): (&mut Vec<f32>, &mut Vec<f32>) = if clipping_area.len() % 4 >= 2 {
+        (clip_output, scratch)
+    } else {
+        (scratch, clip_output)
+    };
+
+    input.clear();
+    input.extend_from_slice(&[x1, y1, x2, y2, x3, y3, x1, y1]);
+    output.clear();
+
+    let mut i = 0usize;
+    loop {
+        let edge_x = clipping_area[i];
+        let edge_y = clipping_area[i + 1];
+        let ex = edge_x - clipping_area[i + 2];
+        let ey = edge_y - clipping_area[i + 3];
+        let output_start = output.len();
+        let fragment_start = inverse_vertices.len();
+        inverse_vertices.push(0.0);
+
+        let mut ii = 0usize;
+        while ii + 3 < input.len() {
+            let x1 = input[ii];
+            let y1 = input[ii + 1];
+            ii += 2;
+            let x2 = input[ii];
+            let y2 = input[ii + 1];
+
+            let s2 = ey * (edge_x - x2) > ex * (edge_y - y2);
+            let s1 = ey * (edge_x - x1) - ex * (edge_y - y1);
+
+            if s1 > 0.0 {
+                if s2 {
+                    output.push(x2);
+                    output.push(y2);
+                } else {
+                    let ix = x2 - x1;
+                    let iy = y2 - y1;
+                    let t = s1 / (ix * ey - iy * ex);
+                    if (0.0..=1.0).contains(&t) {
+                        let cx = x1 + ix * t;
+                        let cy = y1 + iy * t;
+                        output.push(cx);
+                        output.push(cy);
+                        inverse_vertices.push(cx);
+                        inverse_vertices.push(cy);
+                        inverse_vertices.push(x2);
+                        inverse_vertices.push(y2);
+                    } else {
+                        output.push(x2);
+                        output.push(y2);
+                    }
+                }
+            } else if s2 {
+                let dx = x2 - x1;
+                let dy = y2 - y1;
+                let t = s1 / (dx * ey - dy * ex);
+                if (0.0..=1.0).contains(&t) {
+                    let cx = x1 + dx * t;
+                    let cy = y1 + dy * t;
+                    inverse_vertices.push(cx);
+                    inverse_vertices.push(cy);
+                    output.push(cx);
+                    output.push(cy);
+                    output.push(x2);
+                    output.push(y2);
+                } else {
+                    output.push(x2);
+                    output.push(y2);
+                }
+            } else {
+                inverse_vertices.push(x2);
+                inverse_vertices.push(y2);
+            }
+        }
+
+        let fragment_size = inverse_vertices.len() - fragment_start - 1;
+        if fragment_size >= 6 {
+            inverse_vertices[fragment_start] = fragment_size as f32;
+        } else {
+            inverse_vertices.truncate(fragment_start);
+        }
+
+        if output_start == output.len() {
+            break;
+        }
+
+        output.push(output[0]);
+        output.push(output[1]);
+
+        if i == clipping_vertices_last {
+            break;
+        }
+
+        std::mem::swap(&mut input, &mut output);
+        output.clear();
         i += 2;
     }
 }

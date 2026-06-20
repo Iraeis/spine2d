@@ -12,8 +12,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from upstream_baseline import load_upstream_baseline
 
-UPSTREAM_DEFAULT_REPO = "https://github.com/EsotericSoftware/spine-runtimes"
+
+UPSTREAM_BASELINE = load_upstream_baseline()
+UPSTREAM_DEFAULT_REPO = UPSTREAM_BASELINE.repo_url
 SPARSE_CHECKOUT_DIRS = [
     "examples",
     "spine-c",
@@ -144,6 +147,8 @@ def write_source_metadata(import_dest: Path, info: GitInfo, *, mode: str, scope:
         "\n".join(
             [
                 f"Source: {info.remote}",
+                f"TargetVersion: {UPSTREAM_BASELINE.target_version}",
+                f"UpstreamRef: {UPSTREAM_BASELINE.upstream_ref}",
                 f"Commit: {info.commit}",
                 f"ImportedAtUTC: {ts}",
                 f"Mode: {mode}",
@@ -236,8 +241,8 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--repo-url", default=UPSTREAM_DEFAULT_REPO)
     ap.add_argument(
         "--rev",
-        default="4.3-beta",
-        help="Commit/tag/branch to checkout (default: 4.3-beta).",
+        default=UPSTREAM_BASELINE.upstream_ref,
+        help=f"Commit/tag/branch to checkout (default: {UPSTREAM_BASELINE.upstream_ref}).",
     )
     ap.add_argument("--cache", default=".cache/spine-runtimes", help="Local git checkout directory.")
     ap.add_argument(

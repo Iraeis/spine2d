@@ -10,9 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
+from upstream_baseline import load_upstream_baseline
+
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
 ORACLE_RUNNER = ROOT_DIR / "scripts" / "run_spine_cpp_lite_render_oracle.zsh"
+UPSTREAM_BASELINE = load_upstream_baseline()
 
 
 def find_examples_root() -> Path:
@@ -31,7 +34,8 @@ def find_examples_root() -> Path:
         if p.is_dir():
             return p
     raise SystemExit(
-        "Missing upstream Spine examples. Run `python3 ./scripts/prepare_spine_runtimes_web_assets.py --scope tests` "
+        "Missing upstream Spine examples. Run "
+        f"`python3 ./scripts/prepare_spine_runtimes_web_assets.py --scope tests --rev {UPSTREAM_BASELINE.upstream_ref}` "
         "or set SPINE2D_UPSTREAM_EXAMPLES_DIR."
     )
 
@@ -280,8 +284,8 @@ def scenario_cases_json() -> List[RenderScenarioCase]:
                 "1",
                 "shoot",
                 "0",
-                "--entry-mix-blend",
-                "add",
+                "--entry-additive",
+                "1",
                 "--entry-alpha",
                 "0.5",
                 "--step",
@@ -378,8 +382,9 @@ def write_source(out_dir: Path, *, commit: str, fmt: str) -> None:
     (out_dir / "SOURCE.txt").write_text(
         "\n".join(
             [
-                "Source: https://github.com/EsotericSoftware/spine-runtimes",
-                "Branch: 4.3-beta",
+                f"Source: {UPSTREAM_BASELINE.repo_url}",
+                f"TargetVersion: {UPSTREAM_BASELINE.target_version}",
+                f"UpstreamRef: {UPSTREAM_BASELINE.upstream_ref}",
                 f"TargetCommit: {commit}",
                 f"RecordedAtUTC: {now}",
                 f"Format: {fmt}",

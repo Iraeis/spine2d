@@ -1,19 +1,11 @@
 use crate::runtime::{AnimationState, AnimationStateData};
 use crate::{
     Animation, AttachmentData, AttachmentFrame, AttachmentTimeline, BlendMode, BoneData,
-    BoneTimeline, Curve, DrawOrderFrame, DrawOrderTimeline, Inherit, MixBlend,
-    RegionAttachmentData, Skeleton, SkeletonData, SkinData, SlotData, TranslateTimeline, Vec2Frame,
+    DrawOrderFrame, DrawOrderTimeline, Inherit, RegionAttachmentData, Skeleton, SkeletonData,
+    SkinData, SlotData,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
-
-fn assert_approx(actual: f32, expected: f32) {
-    let diff = (actual - expected).abs();
-    assert!(
-        diff <= 1.0e-6,
-        "expected {expected}, got {actual} (diff {diff})"
-    );
-}
 
 fn base_skeleton_data() -> SkeletonData {
     SkeletonData {
@@ -43,107 +35,6 @@ fn base_skeleton_data() -> SkeletonData {
         path_constraints: Vec::new(),
         physics_constraints: Vec::new(),
         slider_constraints: Vec::new(),
-    }
-}
-
-#[test]
-fn hold_previous_keeps_unkeyed_properties_from_fading_out() {
-    let anim_a = Animation {
-        name: "a".to_string(),
-        duration: 0.0,
-        event_timeline: None,
-        bone_timelines: vec![BoneTimeline::Translate(TranslateTimeline {
-            bone_index: 0,
-            frames: vec![Vec2Frame {
-                time: 0.0,
-                x: 10.0,
-                y: 0.0,
-                curve: [Curve::Linear; 2],
-            }],
-        })],
-        deform_timelines: Vec::new(),
-        sequence_timelines: Vec::new(),
-        slot_attachment_timelines: Vec::new(),
-        slot_color_timelines: Vec::new(),
-        slot_rgb_timelines: Vec::new(),
-        slot_alpha_timelines: Vec::new(),
-        slot_rgba2_timelines: Vec::new(),
-        slot_rgb2_timelines: Vec::new(),
-        ik_constraint_timelines: Vec::new(),
-        transform_constraint_timelines: Vec::new(),
-        path_constraint_timelines: Vec::new(),
-        physics_constraint_timelines: Vec::new(),
-        physics_reset_timelines: Vec::new(),
-        slider_time_timelines: Vec::new(),
-        slider_mix_timelines: Vec::new(),
-        draw_order_timeline: None,
-    };
-    let anim_b = Animation {
-        name: "b".to_string(),
-        duration: 0.0,
-        event_timeline: None,
-        bone_timelines: Vec::new(),
-        deform_timelines: Vec::new(),
-        sequence_timelines: Vec::new(),
-        slot_attachment_timelines: Vec::new(),
-        slot_color_timelines: Vec::new(),
-        slot_rgb_timelines: Vec::new(),
-        slot_alpha_timelines: Vec::new(),
-        slot_rgba2_timelines: Vec::new(),
-        slot_rgb2_timelines: Vec::new(),
-        ik_constraint_timelines: Vec::new(),
-        transform_constraint_timelines: Vec::new(),
-        path_constraint_timelines: Vec::new(),
-        physics_constraint_timelines: Vec::new(),
-        physics_reset_timelines: Vec::new(),
-        slider_time_timelines: Vec::new(),
-        slider_mix_timelines: Vec::new(),
-        draw_order_timeline: None,
-    };
-
-    let mut data = base_skeleton_data();
-    data.animations = vec![anim_a, anim_b];
-    data.animation_index.insert("a".to_string(), 0);
-    data.animation_index.insert("b".to_string(), 1);
-    let data = Arc::new(data);
-
-    let mut state_data = AnimationStateData::new(data.clone());
-    state_data.set_mix("a", "b", 1.0).unwrap();
-
-    // Without holdPrevious, A fades out for properties not keyed by B.
-    {
-        let mut state = AnimationState::new(state_data.clone());
-        let mut skeleton = Skeleton::new(data.clone());
-
-        state.set_animation(0, "a", false).unwrap();
-        skeleton.set_to_setup_pose();
-        state.apply(&mut skeleton);
-        assert_approx(skeleton.bones[0].x, 10.0);
-
-        state.set_animation(0, "b", false).unwrap();
-        state.update(0.8);
-        skeleton.set_to_setup_pose();
-        state.apply(&mut skeleton);
-        assert_approx(skeleton.bones[0].x, 2.0);
-    }
-
-    // With holdPrevious, A is held (alphaHold) instead of fading out (alphaMix).
-    {
-        let mut state = AnimationState::new(state_data);
-        let mut skeleton = Skeleton::new(data);
-
-        let a = state.set_animation(0, "a", false).unwrap();
-        a.set_mix_blend(&mut state, MixBlend::Replace);
-        skeleton.set_to_setup_pose();
-        state.apply(&mut skeleton);
-        assert_approx(skeleton.bones[0].x, 10.0);
-
-        let b = state.set_animation(0, "b", false).unwrap();
-        b.set_hold_previous(&mut state, true);
-        state.update(0.8);
-        skeleton.set_to_setup_pose();
-        state.apply(&mut skeleton);
-        assert_approx(skeleton.bones[0].x, 10.0);
     }
 }
 

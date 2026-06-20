@@ -458,6 +458,8 @@ pub struct ClippingAttachmentData {
     pub name: String,
     pub vertices: MeshVertices,
     pub end_slot: Option<usize>,
+    pub convex: bool,
+    pub inverse: bool,
 }
 
 #[derive(Clone, Debug)]

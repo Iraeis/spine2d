@@ -1,4 +1,4 @@
-use super::animation::ANIMATION_STATE_SETUP;
+use super::animation::ANIMATION_STATE_ATTACH_SETUP;
 use crate::{
     Animation, Error, Event, MixBlend, MixDirection, Skeleton, SkeletonData, apply_attachment,
     apply_deform, apply_draw_order, apply_ik_constraint_timeline, apply_inherit,
@@ -78,12 +78,26 @@ const PROPERTY_SLIDER_TIME: u64 = 1 << 29;
 const PROPERTY_SLIDER_MIX: u64 = 1 << 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TimelineMode {
+enum TimelineFrom {
+    Setup,
+    Current,
     First,
-    Subsequent,
-    HoldFirst,
-    HoldSubsequent,
-    HoldMix,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TimelineMode {
+    from: TimelineFrom,
+    hold: bool,
+}
+
+impl TimelineMode {
+    const fn new(from: TimelineFrom, hold: bool) -> Self {
+        Self { from, hold }
+    }
+
+    const fn setup() -> Self {
+        Self::new(TimelineFrom::Setup, false)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -174,6 +188,55 @@ fn timeline_kinds(animation: &Animation) -> Vec<TimelineKind> {
         out.push(TimelineKind::DrawOrder);
     }
     out
+}
+
+fn timeline_kind_supports_additive(animation: &Animation, kind: TimelineKind) -> bool {
+    match kind {
+        TimelineKind::Deform(_) => true,
+        TimelineKind::Bone(i) => {
+            !matches!(animation.bone_timelines[i], crate::BoneTimeline::Inherit(_))
+        }
+        TimelineKind::TransformConstraint(_) => true,
+        TimelineKind::PathConstraint(i) => matches!(
+            animation.path_constraint_timelines[i],
+            crate::PathConstraintTimeline::Position(_)
+        ),
+        TimelineKind::PhysicsConstraint(i) => matches!(
+            animation.physics_constraint_timelines[i],
+            crate::PhysicsConstraintTimeline::Wind(_)
+                | crate::PhysicsConstraintTimeline::Gravity(_)
+        ),
+        TimelineKind::SliderMix(_) => true,
+        TimelineKind::SlotAttachment(_)
+        | TimelineKind::Sequence(_)
+        | TimelineKind::SlotColor(_)
+        | TimelineKind::SlotRgb(_)
+        | TimelineKind::SlotAlpha(_)
+        | TimelineKind::SlotRgba2(_)
+        | TimelineKind::SlotRgb2(_)
+        | TimelineKind::IkConstraint(_)
+        | TimelineKind::SliderTime(_)
+        | TimelineKind::DrawOrder => false,
+    }
+}
+
+fn timeline_blend_for_mode(
+    animation: &Animation,
+    kind: TimelineKind,
+    mode: TimelineMode,
+    entry_additive: bool,
+) -> MixBlend {
+    match mode.from {
+        TimelineFrom::Current => {
+            if entry_additive && timeline_kind_supports_additive(animation, kind) {
+                MixBlend::Add
+            } else {
+                MixBlend::Replace
+            }
+        }
+        TimelineFrom::Setup => MixBlend::Setup,
+        TimelineFrom::First => MixBlend::First,
+    }
 }
 
 fn timeline_property_ids(
@@ -428,11 +491,10 @@ pub struct TrackEntry {
     pub ended: bool,
 
     pub alpha: f32,
-    pub interrupt_alpha: f32,
     pub total_alpha: f32,
+    keep_hold: bool,
     mixing_to: Option<EntryId>,
-    pub mix_blend: MixBlend,
-    pub hold_previous: bool,
+    pub additive: bool,
     pub alpha_attachment_threshold: f32,
     pub mix_attachment_threshold: f32,
     pub mix_draw_order_threshold: f32,
@@ -503,11 +565,10 @@ impl TrackEntry {
             complete_pending: false,
             ended: false,
             alpha: 1.0,
-            interrupt_alpha: 1.0,
             total_alpha: 0.0,
+            keep_hold: false,
             mixing_to: None,
-            mix_blend: MixBlend::Replace,
-            hold_previous: false,
+            additive: false,
             alpha_attachment_threshold: 0.0,
             mix_attachment_threshold: 0.0,
             mix_draw_order_threshold: 0.0,
@@ -609,15 +670,9 @@ impl TrackEntryHandle {
         });
     }
 
-    pub fn set_mix_blend(&self, state: &mut AnimationState, mix_blend: MixBlend) {
+    pub fn set_additive(&self, state: &mut AnimationState, additive: bool) {
         self.with_entry_mut(state, |entry| {
-            entry.mix_blend = mix_blend;
-        });
-    }
-
-    pub fn set_hold_previous(&self, state: &mut AnimationState, hold_previous: bool) {
-        self.with_entry_mut(state, |entry| {
-            entry.hold_previous = hold_previous;
+            entry.additive = additive;
         });
     }
 
@@ -747,7 +802,7 @@ pub struct AnimationState {
     listener: Option<Box<dyn AnimationStateListener>>,
     draining_events: bool,
     animations_changed: bool,
-    property_ids: HashSet<u64>,
+    property_ids: HashMap<u64, EntryId>,
     unkeyed_state: i32,
 }
 
@@ -763,7 +818,7 @@ impl AnimationState {
             listener: None,
             draining_events: false,
             animations_changed: false,
-            property_ids: HashSet::new(),
+            property_ids: HashMap::new(),
             unkeyed_state: 0,
         }
     }
@@ -784,14 +839,22 @@ impl AnimationState {
         self.tracks.len()
     }
 
-    fn add_all_property_ids(&mut self, ids: &[u64]) -> bool {
-        let mut all_new = true;
-        for id in ids {
-            if !self.property_ids.insert(*id) {
-                all_new = false;
+    fn mix_from_for_property_ids(&mut self, owner: EntryId, ids: &[u64]) -> TimelineFrom {
+        let mut mix_from = TimelineFrom::Setup;
+        for (i, id) in ids.iter().copied().enumerate() {
+            if let Some(existing_owner) = self.property_ids.get(&id).copied() {
+                if existing_owner != owner {
+                    for id in ids.iter().skip(i + 1).copied() {
+                        self.property_ids.entry(id).or_insert(owner);
+                    }
+                    return TimelineFrom::Current;
+                }
+                mix_from = TimelineFrom::First;
+            } else {
+                self.property_ids.insert(id, owner);
             }
         }
-        all_new
+        mix_from
     }
 
     fn animations_changed(&mut self) {
@@ -803,7 +866,8 @@ impl AnimationState {
             .iter()
             .filter_map(|t| t.current)
             .collect::<Vec<_>>();
-        for mut entry_id in current_ids {
+        for track_owner in current_ids {
+            let mut entry_id = track_owner;
             while let Some(from) = self.entry(entry_id).and_then(|e| e.mixing_from) {
                 entry_id = from;
             }
@@ -816,60 +880,40 @@ impl AnimationState {
             }
 
             for id in chain {
-                let should_compute = self
-                    .entry(id)
-                    .is_some_and(|e| e.mixing_to.is_none() || e.mix_blend != MixBlend::Add);
-                if should_compute {
-                    self.compute_hold(id);
-                }
+                self.compute_hold(id, track_owner);
             }
         }
+        self.property_ids.clear();
     }
 
-    fn compute_hold(&mut self, entry_id: EntryId) {
-        let (animation, to_id, to_hold_previous) = match self.entry(entry_id) {
-            Some(entry) => (
-                entry.animation.clone(),
-                entry.mixing_to,
-                entry
-                    .mixing_to
-                    .and_then(|to| self.entry(to))
-                    .map(|to| to.hold_previous)
-                    .unwrap_or(false),
-            ),
-            None => return,
-        };
+    fn compute_hold(&mut self, entry_id: EntryId, track_owner: EntryId) {
+        let (animation, to_id, additive, keep_hold, previous_timeline_mode) =
+            match self.entry(entry_id) {
+                Some(entry) => (
+                    entry.animation.clone(),
+                    entry.mixing_to,
+                    entry.additive,
+                    entry.keep_hold,
+                    entry.timeline_mode.clone(),
+                ),
+                None => return,
+            };
 
         let kinds = timeline_kinds(&animation);
-        let mut timeline_mode = vec![TimelineMode::First; kinds.len()];
+        let mut timeline_mode = vec![TimelineMode::setup(); kinds.len()];
         let mut timeline_hold_mix = vec![None; kinds.len()];
-
-        if to_id.is_some() && to_hold_previous {
-            for (i, kind) in kinds.iter().copied().enumerate() {
-                let ids = timeline_property_ids(&self.data.skeleton_data, &animation, kind);
-                let is_first = self.add_all_property_ids(&ids);
-                timeline_mode[i] = if is_first {
-                    TimelineMode::HoldFirst
-                } else {
-                    TimelineMode::HoldSubsequent
-                };
-            }
-            if let Some(entry) = self.entry_mut(entry_id) {
-                entry.timeline_mode = timeline_mode;
-                entry.timeline_hold_mix = timeline_hold_mix;
-            }
-            return;
-        }
 
         for (i, kind) in kinds.iter().copied().enumerate() {
             let ids = timeline_property_ids(&self.data.skeleton_data, &animation, kind);
-            if !self.add_all_property_ids(&ids) {
-                timeline_mode[i] = TimelineMode::Subsequent;
+            let mix_from = self.mix_from_for_property_ids(track_owner, &ids);
+
+            if additive && timeline_kind_supports_additive(&animation, kind) {
+                timeline_mode[i] = TimelineMode::new(mix_from, false);
                 continue;
             }
 
             let Some(to_id) = to_id else {
-                timeline_mode[i] = TimelineMode::First;
+                timeline_mode[i] = TimelineMode::new(mix_from, false);
                 continue;
             };
 
@@ -880,13 +924,17 @@ impl AnimationState {
             let to_anim = match self.entry(to_id) {
                 Some(to) => &to.animation,
                 None => {
-                    timeline_mode[i] = TimelineMode::First;
+                    timeline_mode[i] = TimelineMode::new(mix_from, false);
                     continue;
                 }
             };
 
-            if is_special || !animation_has_any_property(&self.data.skeleton_data, to_anim, &ids) {
-                timeline_mode[i] = TimelineMode::First;
+            let to_additive = self.entry(to_id).is_some_and(|to| to.additive);
+            if is_special
+                || (to_additive && timeline_kind_supports_additive(&animation, kind))
+                || !animation_has_any_property(&self.data.skeleton_data, to_anim, &ids)
+            {
+                timeline_mode[i] = TimelineMode::new(mix_from, false);
                 continue;
             }
 
@@ -896,7 +944,12 @@ impl AnimationState {
                 let Some(next_entry) = self.entry(next_id) else {
                     break;
                 };
-                if animation_has_any_property(&self.data.skeleton_data, &next_entry.animation, &ids)
+                if !(next_entry.additive && timeline_kind_supports_additive(&animation, kind))
+                    && animation_has_any_property(
+                        &self.data.skeleton_data,
+                        &next_entry.animation,
+                        &ids,
+                    )
                 {
                     next = next_entry.mixing_to;
                     continue;
@@ -908,16 +961,27 @@ impl AnimationState {
             }
 
             if let Some(hold_mix) = hold_mix {
-                timeline_mode[i] = TimelineMode::HoldMix;
+                timeline_mode[i] = TimelineMode::new(mix_from, true);
                 timeline_hold_mix[i] = Some(hold_mix);
             } else {
-                timeline_mode[i] = TimelineMode::HoldFirst;
+                timeline_mode[i] = TimelineMode::new(mix_from, true);
+            }
+
+            if keep_hold {
+                let previous_had_hold = previous_timeline_mode
+                    .get(i)
+                    .is_some_and(|mode| mode.hold);
+                if !previous_had_hold {
+                    timeline_mode[i] = TimelineMode::new(mix_from, false);
+                    timeline_hold_mix[i] = None;
+                }
             }
         }
 
         if let Some(entry) = self.entry_mut(entry_id) {
             entry.timeline_mode = timeline_mode;
             entry.timeline_hold_mix = timeline_hold_mix;
+            entry.keep_hold = false;
         }
     }
 
@@ -1018,22 +1082,11 @@ impl AnimationState {
                 .map(|entry| entry.animation_index)
                 .unwrap_or(EMPTY_ANIMATION_INDEX);
             let mix_duration = self.data.mix_duration(previous_index, animation_index);
-            let interrupt_alpha_mul = self
-                .entry(previous)
-                .and_then(|prev| {
-                    if prev.mixing_from.is_some() && prev.mix_duration > 0.0 {
-                        Some((prev.mix_time / prev.mix_duration).clamp(0.0, 1.0))
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(1.0);
 
             if let Some(entry_ref) = self.entry_mut(entry_id) {
                 entry_ref.mix_duration = mix_duration;
                 entry_ref.mixing_from = Some(previous);
                 entry_ref.mix_time = 0.0;
-                entry_ref.interrupt_alpha *= interrupt_alpha_mul;
             }
 
             // Match spine-cpp: reset rotation mixing state when an entry becomes `mixingFrom`.
@@ -1253,16 +1306,6 @@ impl AnimationState {
                 if next_time + TIME_EPSILON >= 0.0 {
                     let old_time_scale =
                         self.entry(current_id).map(|e| e.time_scale).unwrap_or(0.0);
-                    let interrupt_alpha_mul = self
-                        .entry(current_id)
-                        .and_then(|current| {
-                            if current.mixing_from.is_some() && current.mix_duration > 0.0 {
-                                Some((current.mix_time / current.mix_duration).clamp(0.0, 1.0))
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(1.0);
                     if let Some(current) = self.entry_mut(current_id) {
                         current.track_time += current_delta;
                     }
@@ -1279,7 +1322,6 @@ impl AnimationState {
                                 (next_time / old_time_scale + delta) * next.time_scale;
                         }
                         next.mixing_from = Some(current_id);
-                        next.interrupt_alpha *= interrupt_alpha_mul;
                         next.mix_time = 0.0;
                         if next.mix_duration <= 0.0 {
                             next.mix_duration = delta;
@@ -1356,14 +1398,20 @@ impl AnimationState {
                 MixBlend::First
             } else {
                 self.entry(current_id)
-                    .map(|e| e.mix_blend)
+                    .map(|e| {
+                        if e.additive {
+                            MixBlend::Add
+                        } else {
+                            MixBlend::Replace
+                        }
+                    })
                     .unwrap_or(MixBlend::Replace)
             };
 
             let mut alpha = self.entry(current_id).map(|e| e.alpha).unwrap_or(1.0);
 
             if self.entry(current_id).and_then(|e| e.mixing_from).is_some() {
-                alpha *= self.apply_mixing_from_pose(current_id, skeleton, blend, &mut pending);
+                alpha *= self.apply_mixing_from_pose(current_id, skeleton, &mut pending);
             } else {
                 let track_end_reached = {
                     let track = &self.tracks[track_index];
@@ -1408,7 +1456,6 @@ impl AnimationState {
                 apply_time,
                 looped,
                 alpha,
-                blend,
                 attachments,
                 MixDirection::In,
             );
@@ -1416,7 +1463,7 @@ impl AnimationState {
             self.apply_entry_events_and_complete(current_id, None, !reverse, &mut pending);
         }
 
-        let setup_state = self.unkeyed_state + ANIMATION_STATE_SETUP;
+        let setup_state = self.unkeyed_state + ANIMATION_STATE_ATTACH_SETUP;
         for (i, slot) in skeleton.slots.iter_mut().enumerate() {
             if slot.attachment_state == setup_state {
                 slot.attachment = skeleton
@@ -1441,7 +1488,6 @@ impl AnimationState {
         time: f32,
         looped: bool,
         alpha: f32,
-        blend: MixBlend,
         attachments: bool,
         direction: MixDirection,
     ) {
@@ -1451,7 +1497,7 @@ impl AnimationState {
 
         let shortest_rotation = self
             .entry(entry_id)
-            .map(|e| e.shortest_rotation)
+            .map(|e| e.additive || e.shortest_rotation)
             .unwrap_or(false);
 
         let mut time = time;
@@ -1477,8 +1523,8 @@ impl AnimationState {
         }
 
         let track_index = self.entry(entry_id).map(|e| e.track_index).unwrap_or(0);
-        let special_case = (track_index == 0 && alpha >= 1.0 && direction == MixDirection::In)
-            || blend == MixBlend::Add;
+        let special_case = track_index == 0 && alpha >= 1.0 && direction == MixDirection::In;
+        let entry_additive = self.entry(entry_id).is_some_and(|e| e.additive);
 
         let kinds = timeline_kinds(animation);
         let mut timeline_mode = self
@@ -1514,17 +1560,27 @@ impl AnimationState {
 
         let mut rotate_index = 0usize;
         for (i, kind) in kinds.into_iter().enumerate() {
-            let timeline_blend =
-                if special_case || matches!(timeline_mode.get(i), Some(TimelineMode::Subsequent)) {
-                    blend
-                } else {
-                    MixBlend::Setup
-                };
+            let mode = timeline_mode
+                .get(i)
+                .copied()
+                .unwrap_or_else(TimelineMode::setup);
+            let timeline_blend = if special_case {
+                MixBlend::Setup
+            } else {
+                timeline_blend_for_mode(animation, kind, mode, entry_additive)
+            };
 
             match kind {
                 TimelineKind::SlotAttachment(ti) => {
                     let timeline = &animation.slot_attachment_timelines[ti];
-                    apply_attachment(timeline, skeleton, time, blend, attachments, unkeyed_state);
+                    apply_attachment(
+                        timeline,
+                        skeleton,
+                        time,
+                        timeline_blend,
+                        attachments,
+                        unkeyed_state,
+                    );
                 }
                 TimelineKind::Deform(ti) => {
                     let timeline = &animation.deform_timelines[ti];
@@ -1539,7 +1595,7 @@ impl AnimationState {
                         if !shortest_rotation
                             && !special_case
                             && alpha < 1.0
-                            && blend != MixBlend::Add
+                            && timeline_blend != MixBlend::Add
                         {
                             if let Some(entry) = self.entry_mut(entry_id) {
                                 apply_rotate_mixed(
@@ -1628,6 +1684,7 @@ impl AnimationState {
                         time,
                         alpha,
                         timeline_blend,
+                        entry_additive && timeline_kind_supports_additive(animation, kind),
                     );
                 }
                 TimelineKind::PathConstraint(ti) => {
@@ -1665,24 +1722,25 @@ impl AnimationState {
         &mut self,
         to: EntryId,
         skeleton: &mut Skeleton,
-        blend: MixBlend,
         out: &mut VecDeque<QueuedEvent>,
     ) -> f32 {
         let Some(from) = self.entry(to).and_then(|entry| entry.mixing_from) else {
             return 1.0;
         };
 
-        if self
+        let from_mix = if self
             .entry(from)
             .and_then(|entry| entry.mixing_from)
             .is_some()
         {
-            self.apply_mixing_from_pose(from, skeleton, blend, out);
-        }
+            self.apply_mixing_from_pose(from, skeleton, out)
+        } else {
+            1.0
+        };
 
-        let (mix_time, mix_duration, interrupt_alpha) = self
+        let (mix_time, mix_duration, to_alpha) = self
             .entry(to)
-            .map(|to_ref| (to_ref.mix_time, to_ref.mix_duration, to_ref.interrupt_alpha))
+            .map(|to_ref| (to_ref.mix_time, to_ref.mix_duration, to_ref.alpha))
             .unwrap_or((0.0, 0.0, 1.0));
 
         let (
@@ -1691,7 +1749,7 @@ impl AnimationState {
             from_looped,
             from_reverse,
             from_shortest_rotation,
-            from_mix_blend,
+            from_additive,
             from_alpha,
             from_thresholds,
         ) = match self.entry(from) {
@@ -1701,7 +1759,7 @@ impl AnimationState {
                 from_ref.looped,
                 from_ref.reverse,
                 from_ref.shortest_rotation,
-                from_ref.mix_blend,
+                from_ref.additive,
                 from_ref.alpha,
                 (
                     from_ref.alpha_attachment_threshold,
@@ -1712,22 +1770,20 @@ impl AnimationState {
             None => return 1.0,
         };
 
-        let mut from_blend = blend;
         let mix = if mix_duration <= 0.0 {
-            if from_blend == MixBlend::First {
-                from_blend = MixBlend::Setup;
-            }
             1.0
         } else {
-            let m = (mix_time / mix_duration).clamp(0.0, 1.0);
-            if from_blend != MixBlend::First {
-                from_blend = from_mix_blend;
-            }
-            m
+            (mix_time / mix_duration).clamp(0.0, 1.0)
         };
 
-        let alpha_hold = from_alpha * interrupt_alpha;
-        let alpha_mix = alpha_hold * (1.0 - mix);
+        let effective_from_alpha = from_alpha * from_mix;
+        let keep = 1.0 - mix * to_alpha;
+        let alpha_mix = effective_from_alpha * (1.0 - mix);
+        let alpha_hold = if keep > 0.0 {
+            alpha_mix / keep
+        } else {
+            effective_from_alpha
+        };
 
         if let Some(from_entry) = self.entry_mut(from) {
             from_entry.total_alpha = 0.0;
@@ -1742,415 +1798,141 @@ impl AnimationState {
             from_time
         };
 
-        if from_blend == MixBlend::Add {
-            // Match spine-cpp: in Add mode, mixing out applies timelines with `MixDirection::Out`
-            // and does not use the per-timeline hold/subsequent machinery. Timelines that perform
-            // instant changes (attachment/draw order) become no-ops for Add+Out.
+        let kinds = timeline_kinds(&from_animation);
+        let (timeline_mode, timeline_hold_mix) = match self.entry(from) {
+            Some(e) => (e.timeline_mode.clone(), e.timeline_hold_mix.clone()),
+            None => (Vec::new(), Vec::new()),
+        };
+        let alpha_attachment_threshold = from_thresholds.0;
+
+        if !from_animation.physics_reset_timelines.is_empty() && !from_reverse {
+            let mut last_time = self
+                .entry(from)
+                .map(|e| e.animation_last_time)
+                .unwrap_or(-1.0);
             let mut time = from_apply_time;
             if from_looped && from_animation.duration > 0.0 {
                 time = time.rem_euclid(from_animation.duration);
-            }
-
-            if !from_animation.physics_reset_timelines.is_empty() && !from_reverse {
-                let mut last_time = self
-                    .entry(from)
-                    .map(|e| e.animation_last_time)
-                    .unwrap_or(-1.0);
-                if from_looped && from_animation.duration > 0.0 && last_time >= 0.0 {
+                if last_time >= 0.0 {
                     last_time = last_time.rem_euclid(from_animation.duration);
                 }
-                for tl in &from_animation.physics_reset_timelines {
-                    apply_physics_reset_timeline(tl, skeleton, last_time, time);
-                }
             }
-
-            for kind in timeline_kinds(&from_animation) {
-                match kind {
-                    TimelineKind::SlotAttachment(_) => {
-                        // AttachmentTimeline::apply for MixDirection::Out only does work for
-                        // blend==Setup; for Add it is a no-op.
-                    }
-                    TimelineKind::Sequence(_) => {
-                        // SequenceTimeline::apply for MixDirection::Out only does work for blend==Setup;
-                        // for Add it is a no-op.
-                    }
-                    TimelineKind::Deform(ti) => {
-                        let timeline = &from_animation.deform_timelines[ti];
-                        apply_deform(timeline, skeleton, time, alpha_mix, MixBlend::Add);
-                    }
-                    TimelineKind::Bone(ti) => match &from_animation.bone_timelines[ti] {
-                        crate::BoneTimeline::Rotate(tl) => {
-                            apply_rotate(tl, skeleton, time, alpha_mix, MixBlend::Add);
-                        }
-                        crate::BoneTimeline::Translate(tl) => {
-                            apply_translate(tl, skeleton, time, alpha_mix, MixBlend::Add);
-                        }
-                        crate::BoneTimeline::TranslateX(tl) => {
-                            apply_translate_x(tl, skeleton, time, alpha_mix, MixBlend::Add);
-                        }
-                        crate::BoneTimeline::TranslateY(tl) => {
-                            apply_translate_y(tl, skeleton, time, alpha_mix, MixBlend::Add);
-                        }
-                        crate::BoneTimeline::Scale(tl) => {
-                            apply_scale(
-                                tl,
-                                skeleton,
-                                time,
-                                alpha_mix,
-                                MixBlend::Add,
-                                MixDirection::Out,
-                            );
-                        }
-                        crate::BoneTimeline::ScaleX(tl) => {
-                            apply_scale_x(
-                                tl,
-                                skeleton,
-                                time,
-                                alpha_mix,
-                                MixBlend::Add,
-                                MixDirection::Out,
-                            );
-                        }
-                        crate::BoneTimeline::ScaleY(tl) => {
-                            apply_scale_y(
-                                tl,
-                                skeleton,
-                                time,
-                                alpha_mix,
-                                MixBlend::Add,
-                                MixDirection::Out,
-                            );
-                        }
-                        crate::BoneTimeline::Shear(tl) => {
-                            apply_shear(tl, skeleton, time, alpha_mix, MixBlend::Add);
-                        }
-                        crate::BoneTimeline::ShearX(tl) => {
-                            apply_shear_x(tl, skeleton, time, alpha_mix, MixBlend::Add);
-                        }
-                        crate::BoneTimeline::ShearY(tl) => {
-                            apply_shear_y(tl, skeleton, time, alpha_mix, MixBlend::Add);
-                        }
-                        crate::BoneTimeline::Inherit(tl) => {
-                            apply_inherit(tl, skeleton, time, MixBlend::Add, MixDirection::Out);
-                        }
-                    },
-                    TimelineKind::SlotColor(ti) => {
-                        let timeline = &from_animation.slot_color_timelines[ti];
-                        apply_slot_color(timeline, skeleton, time, alpha_mix, MixBlend::Add);
-                    }
-                    TimelineKind::SlotRgb(ti) => {
-                        let timeline = &from_animation.slot_rgb_timelines[ti];
-                        apply_slot_rgb(timeline, skeleton, time, alpha_mix, MixBlend::Add);
-                    }
-                    TimelineKind::SlotAlpha(ti) => {
-                        let timeline = &from_animation.slot_alpha_timelines[ti];
-                        apply_slot_alpha(timeline, skeleton, time, alpha_mix, MixBlend::Add);
-                    }
-                    TimelineKind::SlotRgba2(ti) => {
-                        let timeline = &from_animation.slot_rgba2_timelines[ti];
-                        apply_slot_rgba2(timeline, skeleton, time, alpha_mix, MixBlend::Add);
-                    }
-                    TimelineKind::SlotRgb2(ti) => {
-                        let timeline = &from_animation.slot_rgb2_timelines[ti];
-                        apply_slot_rgb2(timeline, skeleton, time, alpha_mix, MixBlend::Add);
-                    }
-                    TimelineKind::IkConstraint(ti) => {
-                        let timeline = &from_animation.ik_constraint_timelines[ti];
-                        apply_ik_constraint_timeline(
-                            timeline,
-                            skeleton,
-                            time,
-                            alpha_mix,
-                            MixBlend::Add,
-                            MixDirection::Out,
-                        );
-                    }
-                    TimelineKind::TransformConstraint(ti) => {
-                        let timeline = &from_animation.transform_constraint_timelines[ti];
-                        apply_transform_constraint_timeline(
-                            timeline,
-                            skeleton,
-                            time,
-                            alpha_mix,
-                            MixBlend::Add,
-                        );
-                    }
-                    TimelineKind::PathConstraint(ti) => {
-                        let timeline = &from_animation.path_constraint_timelines[ti];
-                        apply_path_constraint_timeline(
-                            timeline,
-                            skeleton,
-                            time,
-                            alpha_mix,
-                            MixBlend::Add,
-                        );
-                    }
-                    TimelineKind::PhysicsConstraint(ti) => {
-                        let timeline = &from_animation.physics_constraint_timelines[ti];
-                        apply_physics_constraint_timeline(
-                            timeline,
-                            skeleton,
-                            time,
-                            alpha_mix,
-                            MixBlend::Add,
-                        );
-                    }
-                    TimelineKind::SliderTime(ti) => {
-                        let timeline = &from_animation.slider_time_timelines[ti];
-                        apply_slider_time_timeline(
-                            timeline,
-                            skeleton,
-                            time,
-                            alpha_mix,
-                            MixBlend::Add,
-                        );
-                    }
-                    TimelineKind::SliderMix(ti) => {
-                        let timeline = &from_animation.slider_mix_timelines[ti];
-                        apply_slider_mix_timeline(
-                            timeline,
-                            skeleton,
-                            time,
-                            alpha_mix,
-                            MixBlend::Add,
-                        );
-                    }
-                    TimelineKind::DrawOrder => {
-                        if let Some(timeline) = from_animation.draw_order_timeline.as_ref() {
-                            apply_draw_order(
-                                timeline,
-                                skeleton,
-                                time,
-                                MixBlend::Add,
-                                MixDirection::Out,
-                            );
-                        }
-                    }
-                }
+            for tl in &from_animation.physics_reset_timelines {
+                apply_physics_reset_timeline(tl, skeleton, last_time, time);
             }
-        } else {
-            let kinds = timeline_kinds(&from_animation);
-            let (timeline_mode, timeline_hold_mix) = match self.entry(from) {
-                Some(e) => (e.timeline_mode.clone(), e.timeline_hold_mix.clone()),
-                None => (Vec::new(), Vec::new()),
-            };
-            let alpha_attachment_threshold = from_thresholds.0;
+        }
 
-            if !from_animation.physics_reset_timelines.is_empty() && !from_reverse {
-                let mut last_time = self
-                    .entry(from)
-                    .map(|e| e.animation_last_time)
-                    .unwrap_or(-1.0);
-                let mut time = from_apply_time;
-                if from_looped && from_animation.duration > 0.0 {
-                    time = time.rem_euclid(from_animation.duration);
-                    if last_time >= 0.0 {
-                        last_time = last_time.rem_euclid(from_animation.duration);
-                    }
+        let rotate_count = from_animation
+            .bone_timelines
+            .iter()
+            .filter(|t| matches!(t, crate::BoneTimeline::Rotate(_)))
+            .count();
+        let from_shortest_rotation = from_additive || from_shortest_rotation;
+        let first_frame = self
+            .entry_mut(from)
+            .map(|entry| {
+                let expected_len = rotate_count * 2;
+                let first = !from_shortest_rotation && entry.rotation_state.len() != expected_len;
+                if first {
+                    entry.rotation_state.resize(expected_len, 0.0);
                 }
-                for tl in &from_animation.physics_reset_timelines {
-                    apply_physics_reset_timeline(tl, skeleton, last_time, time);
-                }
-            }
+                first
+            })
+            .unwrap_or(false);
+        let unkeyed_state = self.unkeyed_state;
 
-            let rotate_count = from_animation
-                .bone_timelines
-                .iter()
-                .filter(|t| matches!(t, crate::BoneTimeline::Rotate(_)))
-                .count();
-            let first_frame = self
-                .entry_mut(from)
-                .map(|entry| {
-                    let expected_len = rotate_count * 2;
-                    let first = entry.rotation_state.len() != expected_len;
-                    if first {
-                        entry.rotation_state.resize(expected_len, 0.0);
-                    }
-                    first
-                })
-                .unwrap_or(false);
-            let unkeyed_state = self.unkeyed_state;
+        let mut rotate_index = 0usize;
+        let mut total_alpha = 0.0f32;
+        for (i, kind) in kinds.into_iter().enumerate() {
+            let mode = timeline_mode
+                .get(i)
+                .copied()
+                .unwrap_or_else(TimelineMode::setup);
+            let timeline_blend =
+                timeline_blend_for_mode(&from_animation, kind, mode, from_additive);
 
-            let mut rotate_index = 0usize;
-            let mut total_alpha = 0.0f32;
-            for (i, kind) in kinds.into_iter().enumerate() {
-                let mode = timeline_mode.get(i).copied().unwrap_or(TimelineMode::First);
-
-                let (timeline_blend, alpha) = match mode {
-                    TimelineMode::Subsequent => (from_blend, alpha_mix),
-                    TimelineMode::First => (MixBlend::Setup, alpha_mix),
-                    TimelineMode::HoldFirst => (MixBlend::Setup, alpha_hold),
-                    TimelineMode::HoldSubsequent => (from_blend, alpha_hold),
-                    TimelineMode::HoldMix => {
-                        let hold_mix = timeline_hold_mix.get(i).copied().flatten();
-                        if let Some(hold_mix) = hold_mix {
-                            let factor = self
-                                .entry(hold_mix)
-                                .map(|e| {
-                                    if e.mix_duration > 0.0 {
-                                        (1.0 - e.mix_time / e.mix_duration).max(0.0)
-                                    } else {
-                                        0.0
-                                    }
-                                })
-                                .unwrap_or(0.0);
-                            (MixBlend::Setup, alpha_hold * factor)
-                        } else {
-                            (MixBlend::Setup, alpha_hold)
-                        }
-                    }
-                };
-                total_alpha += alpha;
-
-                match kind {
-                    TimelineKind::SlotAttachment(ti) => {
-                        let timeline = &from_animation.slot_attachment_timelines[ti];
-                        let apply =
-                            attachments && alpha + TIME_EPSILON >= alpha_attachment_threshold;
-                        apply_attachment(
-                            timeline,
-                            skeleton,
-                            from_apply_time,
-                            timeline_blend,
-                            apply,
-                            unkeyed_state,
-                        );
-                    }
-                    TimelineKind::Deform(ti) => {
-                        let timeline = &from_animation.deform_timelines[ti];
-                        apply_deform(timeline, skeleton, from_apply_time, alpha, timeline_blend);
-                    }
-                    TimelineKind::Sequence(ti) => {
-                        let timeline = &from_animation.sequence_timelines[ti];
-                        apply_sequence_timeline(
-                            timeline,
-                            skeleton,
-                            from_apply_time,
-                            timeline_blend,
-                            MixDirection::Out,
-                        );
-                    }
-                    TimelineKind::Bone(ti) => match &from_animation.bone_timelines[ti] {
-                        crate::BoneTimeline::Rotate(tl) => {
-                            if !from_shortest_rotation && alpha < 1.0 && from_blend != MixBlend::Add
-                            {
-                                if let Some(entry) = self.entry_mut(from) {
-                                    apply_rotate_mixed(
-                                        tl,
-                                        skeleton,
-                                        from_apply_time,
-                                        alpha,
-                                        timeline_blend,
-                                        entry.rotation_state.as_mut_slice(),
-                                        rotate_index,
-                                        first_frame,
-                                    );
-                                }
+            let alpha = if mode.hold {
+                let hold_mix = timeline_hold_mix.get(i).copied().flatten();
+                if let Some(hold_mix) = hold_mix {
+                    let factor = self
+                        .entry(hold_mix)
+                        .map(|e| {
+                            if e.mix_duration > 0.0 {
+                                (1.0 - e.mix_time / e.mix_duration).max(0.0)
                             } else {
-                                apply_rotate(tl, skeleton, from_apply_time, alpha, timeline_blend);
+                                0.0
                             }
-                            rotate_index += 1;
+                        })
+                        .unwrap_or(0.0);
+                    alpha_hold * factor
+                } else {
+                    alpha_hold
+                }
+            } else {
+                alpha_mix
+            };
+            total_alpha += alpha;
+
+            match kind {
+                TimelineKind::SlotAttachment(ti) => {
+                    let timeline = &from_animation.slot_attachment_timelines[ti];
+                    let apply = attachments && alpha + TIME_EPSILON >= alpha_attachment_threshold;
+                    apply_attachment(
+                        timeline,
+                        skeleton,
+                        from_apply_time,
+                        timeline_blend,
+                        apply,
+                        unkeyed_state,
+                    );
+                }
+                TimelineKind::Deform(ti) => {
+                    let timeline = &from_animation.deform_timelines[ti];
+                    apply_deform(timeline, skeleton, from_apply_time, alpha, timeline_blend);
+                }
+                TimelineKind::Sequence(ti) => {
+                    let timeline = &from_animation.sequence_timelines[ti];
+                    apply_sequence_timeline(
+                        timeline,
+                        skeleton,
+                        from_apply_time,
+                        timeline_blend,
+                        MixDirection::Out,
+                    );
+                }
+                TimelineKind::Bone(ti) => match &from_animation.bone_timelines[ti] {
+                    crate::BoneTimeline::Rotate(tl) => {
+                        if !from_shortest_rotation && alpha < 1.0 && timeline_blend != MixBlend::Add
+                        {
+                            if let Some(entry) = self.entry_mut(from) {
+                                apply_rotate_mixed(
+                                    tl,
+                                    skeleton,
+                                    from_apply_time,
+                                    alpha,
+                                    timeline_blend,
+                                    entry.rotation_state.as_mut_slice(),
+                                    rotate_index,
+                                    first_frame,
+                                );
+                            }
+                        } else {
+                            apply_rotate(tl, skeleton, from_apply_time, alpha, timeline_blend);
                         }
-                        crate::BoneTimeline::Translate(tl) => {
-                            apply_translate(tl, skeleton, from_apply_time, alpha, timeline_blend);
-                        }
-                        crate::BoneTimeline::TranslateX(tl) => {
-                            apply_translate_x(tl, skeleton, from_apply_time, alpha, timeline_blend);
-                        }
-                        crate::BoneTimeline::TranslateY(tl) => {
-                            apply_translate_y(tl, skeleton, from_apply_time, alpha, timeline_blend);
-                        }
-                        crate::BoneTimeline::Scale(tl) => {
-                            apply_scale(
-                                tl,
-                                skeleton,
-                                from_apply_time,
-                                alpha,
-                                timeline_blend,
-                                MixDirection::Out,
-                            );
-                        }
-                        crate::BoneTimeline::ScaleX(tl) => {
-                            apply_scale_x(
-                                tl,
-                                skeleton,
-                                from_apply_time,
-                                alpha,
-                                timeline_blend,
-                                MixDirection::Out,
-                            );
-                        }
-                        crate::BoneTimeline::ScaleY(tl) => {
-                            apply_scale_y(
-                                tl,
-                                skeleton,
-                                from_apply_time,
-                                alpha,
-                                timeline_blend,
-                                MixDirection::Out,
-                            );
-                        }
-                        crate::BoneTimeline::Shear(tl) => {
-                            apply_shear(tl, skeleton, from_apply_time, alpha, timeline_blend);
-                        }
-                        crate::BoneTimeline::ShearX(tl) => {
-                            apply_shear_x(tl, skeleton, from_apply_time, alpha, timeline_blend);
-                        }
-                        crate::BoneTimeline::ShearY(tl) => {
-                            apply_shear_y(tl, skeleton, from_apply_time, alpha, timeline_blend);
-                        }
-                        crate::BoneTimeline::Inherit(tl) => {
-                            apply_inherit(
-                                tl,
-                                skeleton,
-                                from_apply_time,
-                                timeline_blend,
-                                MixDirection::Out,
-                            );
-                        }
-                    },
-                    TimelineKind::SlotColor(ti) => {
-                        let timeline = &from_animation.slot_color_timelines[ti];
-                        apply_slot_color(
-                            timeline,
-                            skeleton,
-                            from_apply_time,
-                            alpha,
-                            timeline_blend,
-                        );
+                        rotate_index += 1;
                     }
-                    TimelineKind::SlotRgb(ti) => {
-                        let timeline = &from_animation.slot_rgb_timelines[ti];
-                        apply_slot_rgb(timeline, skeleton, from_apply_time, alpha, timeline_blend);
+                    crate::BoneTimeline::Translate(tl) => {
+                        apply_translate(tl, skeleton, from_apply_time, alpha, timeline_blend);
                     }
-                    TimelineKind::SlotAlpha(ti) => {
-                        let timeline = &from_animation.slot_alpha_timelines[ti];
-                        apply_slot_alpha(
-                            timeline,
-                            skeleton,
-                            from_apply_time,
-                            alpha,
-                            timeline_blend,
-                        );
+                    crate::BoneTimeline::TranslateX(tl) => {
+                        apply_translate_x(tl, skeleton, from_apply_time, alpha, timeline_blend);
                     }
-                    TimelineKind::SlotRgba2(ti) => {
-                        let timeline = &from_animation.slot_rgba2_timelines[ti];
-                        apply_slot_rgba2(
-                            timeline,
-                            skeleton,
-                            from_apply_time,
-                            alpha,
-                            timeline_blend,
-                        );
+                    crate::BoneTimeline::TranslateY(tl) => {
+                        apply_translate_y(tl, skeleton, from_apply_time, alpha, timeline_blend);
                     }
-                    TimelineKind::SlotRgb2(ti) => {
-                        let timeline = &from_animation.slot_rgb2_timelines[ti];
-                        apply_slot_rgb2(timeline, skeleton, from_apply_time, alpha, timeline_blend);
-                    }
-                    TimelineKind::IkConstraint(ti) => {
-                        let timeline = &from_animation.ik_constraint_timelines[ti];
-                        apply_ik_constraint_timeline(
-                            timeline,
+                    crate::BoneTimeline::Scale(tl) => {
+                        apply_scale(
+                            tl,
                             skeleton,
                             from_apply_time,
                             alpha,
@@ -2158,77 +1940,147 @@ impl AnimationState {
                             MixDirection::Out,
                         );
                     }
-                    TimelineKind::TransformConstraint(ti) => {
-                        let timeline = &from_animation.transform_constraint_timelines[ti];
-                        apply_transform_constraint_timeline(
-                            timeline,
+                    crate::BoneTimeline::ScaleX(tl) => {
+                        apply_scale_x(
+                            tl,
                             skeleton,
                             from_apply_time,
                             alpha,
                             timeline_blend,
+                            MixDirection::Out,
                         );
                     }
-                    TimelineKind::PathConstraint(ti) => {
-                        let timeline = &from_animation.path_constraint_timelines[ti];
-                        apply_path_constraint_timeline(
-                            timeline,
+                    crate::BoneTimeline::ScaleY(tl) => {
+                        apply_scale_y(
+                            tl,
                             skeleton,
                             from_apply_time,
                             alpha,
                             timeline_blend,
+                            MixDirection::Out,
                         );
                     }
-                    TimelineKind::PhysicsConstraint(ti) => {
-                        let timeline = &from_animation.physics_constraint_timelines[ti];
-                        apply_physics_constraint_timeline(
+                    crate::BoneTimeline::Shear(tl) => {
+                        apply_shear(tl, skeleton, from_apply_time, alpha, timeline_blend);
+                    }
+                    crate::BoneTimeline::ShearX(tl) => {
+                        apply_shear_x(tl, skeleton, from_apply_time, alpha, timeline_blend);
+                    }
+                    crate::BoneTimeline::ShearY(tl) => {
+                        apply_shear_y(tl, skeleton, from_apply_time, alpha, timeline_blend);
+                    }
+                    crate::BoneTimeline::Inherit(tl) => {
+                        apply_inherit(
+                            tl,
+                            skeleton,
+                            from_apply_time,
+                            timeline_blend,
+                            MixDirection::Out,
+                        );
+                    }
+                },
+                TimelineKind::SlotColor(ti) => {
+                    let timeline = &from_animation.slot_color_timelines[ti];
+                    apply_slot_color(timeline, skeleton, from_apply_time, alpha, timeline_blend);
+                }
+                TimelineKind::SlotRgb(ti) => {
+                    let timeline = &from_animation.slot_rgb_timelines[ti];
+                    apply_slot_rgb(timeline, skeleton, from_apply_time, alpha, timeline_blend);
+                }
+                TimelineKind::SlotAlpha(ti) => {
+                    let timeline = &from_animation.slot_alpha_timelines[ti];
+                    apply_slot_alpha(timeline, skeleton, from_apply_time, alpha, timeline_blend);
+                }
+                TimelineKind::SlotRgba2(ti) => {
+                    let timeline = &from_animation.slot_rgba2_timelines[ti];
+                    apply_slot_rgba2(timeline, skeleton, from_apply_time, alpha, timeline_blend);
+                }
+                TimelineKind::SlotRgb2(ti) => {
+                    let timeline = &from_animation.slot_rgb2_timelines[ti];
+                    apply_slot_rgb2(timeline, skeleton, from_apply_time, alpha, timeline_blend);
+                }
+                TimelineKind::IkConstraint(ti) => {
+                    let timeline = &from_animation.ik_constraint_timelines[ti];
+                    apply_ik_constraint_timeline(
+                        timeline,
+                        skeleton,
+                        from_apply_time,
+                        alpha,
+                        timeline_blend,
+                        MixDirection::Out,
+                    );
+                }
+                TimelineKind::TransformConstraint(ti) => {
+                    let timeline = &from_animation.transform_constraint_timelines[ti];
+                    apply_transform_constraint_timeline(
+                        timeline,
+                        skeleton,
+                        from_apply_time,
+                        alpha,
+                        timeline_blend,
+                        from_additive && timeline_kind_supports_additive(&from_animation, kind),
+                    );
+                }
+                TimelineKind::PathConstraint(ti) => {
+                    let timeline = &from_animation.path_constraint_timelines[ti];
+                    apply_path_constraint_timeline(
+                        timeline,
+                        skeleton,
+                        from_apply_time,
+                        alpha,
+                        timeline_blend,
+                    );
+                }
+                TimelineKind::PhysicsConstraint(ti) => {
+                    let timeline = &from_animation.physics_constraint_timelines[ti];
+                    apply_physics_constraint_timeline(
+                        timeline,
+                        skeleton,
+                        from_apply_time,
+                        alpha,
+                        timeline_blend,
+                    );
+                }
+                TimelineKind::SliderTime(ti) => {
+                    let timeline = &from_animation.slider_time_timelines[ti];
+                    apply_slider_time_timeline(
+                        timeline,
+                        skeleton,
+                        from_apply_time,
+                        alpha,
+                        timeline_blend,
+                    );
+                }
+                TimelineKind::SliderMix(ti) => {
+                    let timeline = &from_animation.slider_mix_timelines[ti];
+                    apply_slider_mix_timeline(
+                        timeline,
+                        skeleton,
+                        from_apply_time,
+                        alpha,
+                        timeline_blend,
+                    );
+                }
+                TimelineKind::DrawOrder => {
+                    if let Some(timeline) = from_animation.draw_order_timeline.as_ref() {
+                        let direction = if draw_order && timeline_blend == MixBlend::Setup {
+                            MixDirection::In
+                        } else {
+                            MixDirection::Out
+                        };
+                        apply_draw_order(
                             timeline,
                             skeleton,
                             from_apply_time,
-                            alpha,
                             timeline_blend,
+                            direction,
                         );
-                    }
-                    TimelineKind::SliderTime(ti) => {
-                        let timeline = &from_animation.slider_time_timelines[ti];
-                        apply_slider_time_timeline(
-                            timeline,
-                            skeleton,
-                            from_apply_time,
-                            alpha,
-                            timeline_blend,
-                        );
-                    }
-                    TimelineKind::SliderMix(ti) => {
-                        let timeline = &from_animation.slider_mix_timelines[ti];
-                        apply_slider_mix_timeline(
-                            timeline,
-                            skeleton,
-                            from_apply_time,
-                            alpha,
-                            timeline_blend,
-                        );
-                    }
-                    TimelineKind::DrawOrder => {
-                        if let Some(timeline) = from_animation.draw_order_timeline.as_ref() {
-                            let direction = if draw_order && timeline_blend == MixBlend::Setup {
-                                MixDirection::In
-                            } else {
-                                MixDirection::Out
-                            };
-                            apply_draw_order(
-                                timeline,
-                                skeleton,
-                                from_apply_time,
-                                timeline_blend,
-                                direction,
-                            );
-                        }
                     }
                 }
             }
-            if let Some(from_entry) = self.entry_mut(from) {
-                from_entry.total_alpha = total_alpha;
-            }
+        }
+        if let Some(from_entry) = self.entry_mut(from) {
+            from_entry.total_alpha = total_alpha;
         }
 
         if mix_duration > 0.0 {
@@ -2384,15 +2236,23 @@ impl AnimationState {
             let from_total_alpha = self.entry(from).map(|e| e.total_alpha).unwrap_or(0.0);
             if to_mix_duration <= 0.0 || from_total_alpha.abs() <= TIME_EPSILON {
                 let next_from = self.entry(from).and_then(|from_ref| from_ref.mixing_from);
-                let from_interrupt_alpha =
-                    self.entry(from).map(|e| e.interrupt_alpha).unwrap_or(1.0);
                 if let Some(to_entry) = self.entry_mut(to) {
                     to_entry.mixing_from = next_from;
-                    to_entry.interrupt_alpha = from_interrupt_alpha;
                 }
                 if let Some(next_from) = next_from {
                     if let Some(entry) = self.entry_mut(next_from) {
                         entry.mixing_to = Some(to);
+                    }
+                }
+                if from_total_alpha.abs() <= TIME_EPSILON {
+                    let mut next = Some(to);
+                    while let Some(next_id) = next {
+                        next = self.entry(next_id).and_then(|entry| entry.mixing_to);
+                        if next.is_some() {
+                            if let Some(entry) = self.entry_mut(next_id) {
+                                entry.keep_hold = true;
+                            }
+                        }
                     }
                 }
                 if let Some(from_entry) = self.entry_mut(from) {

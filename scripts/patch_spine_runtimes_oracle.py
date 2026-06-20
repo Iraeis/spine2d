@@ -15,6 +15,9 @@ def patch_spine_cpp_slider_cpp(text: str) -> str:
     if PATCH_MARKER in text:
         return text
 
+    if "SlotTimeline *asSlotTimeline(Timeline *timeline)" in text:
+        return text
+
     if "#include <spine/SlotTimeline.h>" not in text:
         raise RuntimeError("Unexpected Slider.cpp: missing include <spine/SlotTimeline.h>")
 
@@ -82,4 +85,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

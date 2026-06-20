@@ -357,6 +357,46 @@ fn skel_tank_treads_path_attachment_matches_json() {
 }
 
 #[test]
+#[cfg(all(feature = "json", feature = "binary", feature = "upstream-smoke"))]
+fn skel_tank_treads_path_constraint_matches_json() {
+    let skel = load_bytes("assets/spine-runtimes/examples/tank/export/tank-pro.skel");
+    let json = load_string("assets/spine-runtimes/examples/tank/export/tank-pro.json");
+
+    let data_skel = SkeletonData::from_skel_bytes(&skel).expect("parse skel");
+    let data_json = SkeletonData::from_json_str(&json).expect("parse json");
+
+    let path_skel = data_skel
+        .path_constraints
+        .iter()
+        .find(|c| c.name == "treads-path")
+        .expect("treads-path constraint (skel)");
+    let path_json = data_json
+        .path_constraints
+        .iter()
+        .find(|c| c.name == "treads-path")
+        .expect("treads-path constraint (json)");
+
+    assert_eq!(path_skel.position_mode, path_json.position_mode);
+    assert_eq!(path_skel.spacing_mode, path_json.spacing_mode);
+    assert_eq!(path_skel.rotate_mode, path_json.rotate_mode);
+    assert_eq!(
+        path_skel.position_mode,
+        crate::PositionMode::Percent,
+        "binary path flags must decode percent position mode"
+    );
+    assert_approx(path_skel.position, path_json.position, 1.0e-6, "position");
+    assert_approx(path_skel.spacing, path_json.spacing, 1.0e-6, "spacing");
+    assert_approx(
+        path_skel.mix_rotate,
+        path_json.mix_rotate,
+        1.0e-6,
+        "mix_rotate",
+    );
+    assert_approx(path_skel.mix_x, path_json.mix_x, 1.0e-6, "mix_x");
+    assert_approx(path_skel.mix_y, path_json.mix_y, 1.0e-6, "mix_y");
+}
+
+#[test]
 #[ignore]
 #[cfg(all(feature = "json", feature = "upstream-smoke"))]
 fn skel_matches_json_pose_spineboy_run() {

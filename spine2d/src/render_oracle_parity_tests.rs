@@ -1,4 +1,4 @@
-use crate::runtime::{AnimationState, AnimationStateData, MixBlend, TrackEntryHandle};
+use crate::runtime::{AnimationState, AnimationStateData, TrackEntryHandle};
 use crate::{Atlas, Physics, Skeleton, SkeletonData};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -95,8 +95,7 @@ enum RenderScenarioCommand {
     EntryAlphaAttachmentThreshold(f32),
     EntryMixAttachmentThreshold(f32),
     EntryMixDrawOrderThreshold(f32),
-    EntryHoldPrevious(bool),
-    EntryMixBlend(MixBlend),
+    EntryAdditive(bool),
     EntryReverse(bool),
     EntryShortestRotation(bool),
     EntryResetRotationDirections,
@@ -384,7 +383,7 @@ fn render_scenario_cases_json() -> Vec<RenderScenarioCase> {
                     animation: "shoot",
                     looped: false,
                 },
-                RenderScenarioCommand::EntryMixBlend(MixBlend::Add),
+                RenderScenarioCommand::EntryAdditive(true),
                 RenderScenarioCommand::EntryAlpha(0.5),
                 RenderScenarioCommand::Step(0.3),
             ],
@@ -666,7 +665,7 @@ fn render_scenario_cases_skel() -> Vec<RenderScenarioCase> {
                     animation: "shoot",
                     looped: false,
                 },
-                RenderScenarioCommand::EntryMixBlend(MixBlend::Add),
+                RenderScenarioCommand::EntryAdditive(true),
                 RenderScenarioCommand::EntryAlpha(0.5),
                 RenderScenarioCommand::Step(0.3),
             ],
@@ -1005,8 +1004,12 @@ fn assert_render_parity(case: &RenderCase, golden_path: &Path) {
 
             assert!(
                 dx <= eps_pos && dy <= eps_pos,
-                "{}: triangle #{i} vertex {vi}: pos mismatch: dx={dx} dy={dy} (eps={eps_pos})",
-                case.name
+                "{}: triangle #{i} vertex {vi}: pos mismatch: dx={dx} dy={dy} (eps={eps_pos}); A=({ax},{ay}) draw={},tri={} B=({bx},{by}) draw={},tri={}",
+                case.name,
+                a.reference.draw_index,
+                a.reference.tri_index,
+                b.reference.draw_index,
+                b.reference.tri_index
             );
             assert!(
                 du <= eps_uv && dv <= eps_uv,
@@ -1058,8 +1061,7 @@ fn apply_entry_command(
         RenderScenarioCommand::EntryMixDrawOrderThreshold(t) => {
             last_entry.set_mix_draw_order_threshold(state, t);
         }
-        RenderScenarioCommand::EntryHoldPrevious(v) => last_entry.set_hold_previous(state, v),
-        RenderScenarioCommand::EntryMixBlend(v) => last_entry.set_mix_blend(state, v),
+        RenderScenarioCommand::EntryAdditive(v) => last_entry.set_additive(state, v),
         RenderScenarioCommand::EntryReverse(v) => last_entry.set_reverse(state, v),
         RenderScenarioCommand::EntryShortestRotation(v) => {
             last_entry.set_shortest_rotation(state, v)
@@ -1152,8 +1154,7 @@ fn assert_render_scenario_parity(case: &RenderScenarioCase, golden_path: &Path) 
             | RenderScenarioCommand::EntryAlphaAttachmentThreshold(_)
             | RenderScenarioCommand::EntryMixAttachmentThreshold(_)
             | RenderScenarioCommand::EntryMixDrawOrderThreshold(_)
-            | RenderScenarioCommand::EntryHoldPrevious(_)
-            | RenderScenarioCommand::EntryMixBlend(_)
+            | RenderScenarioCommand::EntryAdditive(_)
             | RenderScenarioCommand::EntryReverse(_)
             | RenderScenarioCommand::EntryShortestRotation(_)
             | RenderScenarioCommand::EntryResetRotationDirections => {
@@ -1176,7 +1177,7 @@ fn assert_render_scenario_parity(case: &RenderScenarioCase, golden_path: &Path) 
         .unwrap_or_else(|e| panic!("parse golden {golden_path:?}: {e}"));
     let golden_tris = triangles_from_doc(&golden);
 
-    // Scenario mode exercises mixing chains (including holdPrevious/mixBlend/additive overlays),
+    // Scenario mode exercises mixing chains (including additive overlays),
     // which tends to magnify small floating-point differences across implementations.
     // Keep the tolerance tight enough to catch semantic mismatches but avoid flakiness.
     let eps_pos = 3e-3_f32;
@@ -1239,8 +1240,12 @@ fn assert_render_scenario_parity(case: &RenderScenarioCase, golden_path: &Path) 
 
             assert!(
                 dx <= eps_pos && dy <= eps_pos,
-                "{}: triangle #{i} vertex {vi}: pos mismatch: dx={dx} dy={dy} (eps={eps_pos})",
-                case.name
+                "{}: triangle #{i} vertex {vi}: pos mismatch: dx={dx} dy={dy} (eps={eps_pos}); A=({ax},{ay}) draw={},tri={} B=({bx},{by}) draw={},tri={}",
+                case.name,
+                a.reference.draw_index,
+                a.reference.tri_index,
+                b.reference.draw_index,
+                b.reference.tri_index
             );
             assert!(
                 du <= eps_uv && dv <= eps_uv,

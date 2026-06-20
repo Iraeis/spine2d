@@ -241,8 +241,9 @@ struct PendingLinkedMesh {
     skin_name: String,
     slot_index: usize,
     attachment_key: String,
-    parent_skin_index: usize,
-    parent_key: String,
+    source_slot_index: usize,
+    source_skin_index: usize,
+    source_key: String,
     inherit_timelines: bool,
 }
 
@@ -338,6 +339,9 @@ fn read_vertices(
         });
     }
 
+    // Official binary stores an additional packed integer for the total weighted vertex
+    // stream length before the per-vertex bone groups.
+    let _weighted_stream_len = input.read_varint(true)? as usize;
     let mut weights_per_vertex = Vec::with_capacity(vertex_count);
     for _ in 0..vertex_count {
         let bone_count = input.read_varint(true)? as usize;
@@ -516,6 +520,11 @@ fn read_attachment(
                 triangles.push(idx as u32);
             }
 
+            let timeline_slot_count = input.read_varint(true)? as usize;
+            for _ in 0..timeline_slot_count {
+                let _ = input.read_varint(true)?;
+            }
+
             if nonessential {
                 let edges_count = input.read_varint(true)? as usize;
                 if trace_binary {
@@ -569,11 +578,12 @@ fn read_attachment(
                 None
             };
             let inherit_timelines = (flags & 128) != 0;
-            let parent_skin_index = input.read_varint(true)? as usize;
-            let parent_key = input
+            let source_slot_index = input.read_varint(true)? as usize;
+            let source_skin_index = input.read_varint(true)? as usize;
+            let source_key = input
                 .read_string_ref(strings)?
                 .ok_or_else(|| Error::BinaryParse {
-                    message: "linked mesh missing parent name".to_string(),
+                    message: "linked mesh missing source name".to_string(),
                 })?;
             if nonessential {
                 let _ = input.read_f32_be()? * scale;
@@ -584,8 +594,9 @@ fn read_attachment(
                 skin_name: skin_name.to_string(),
                 slot_index,
                 attachment_key: attachment_key.to_string(),
-                parent_skin_index,
-                parent_key: parent_key.clone(),
+                source_slot_index,
+                source_skin_index,
+                source_key: source_key.clone(),
                 inherit_timelines,
             });
 
@@ -644,6 +655,8 @@ fn read_attachment(
             // clipping
             let end_slot_index = input.read_varint(true)? as usize;
             let weighted = (flags & 16) != 0;
+            let convex = (flags & 32) != 0;
+            let inverse = (flags & 64) != 0;
             let v = read_vertices(input, weighted, scale)?;
             if nonessential {
                 let _ = input.read_color_rgba()?;
@@ -653,6 +666,8 @@ fn read_attachment(
                 name,
                 vertices: v.vertices,
                 end_slot: Some(end_slot_index),
+                convex,
+                inverse,
             }))
         }
         _ => Err(Error::BinaryParse {
@@ -822,6 +837,8 @@ impl crate::SkeletonData {
             if nonessential {
                 let _ = input.read_color_rgba()?;
                 let _ = input.read_string()?;
+                let _ = input.read_f32_be()?;
+                let _ = input.read_f32_be()?;
                 let _ = input.read_bool()?;
             }
             bones.push(BoneData {
@@ -1087,10 +1104,7 @@ impl crate::SkeletonData {
                     let target = input.read_varint(true)? as usize; // slot index
                     let flags = input.read_u8()?;
                     let skin_required = (flags & 1) != 0;
-                    // NOTE: spine-cpp (4.3) decodes PositionMode from the packed flags using
-                    // `((flags >> 1) & 2)` (see SkeletonBinary.cpp). This is intentionally not
-                    // equivalent to `(flags & 2)`, and affects parity for some `.skel` exports.
-                    let position_mode = if ((flags >> 1) & 2) != 0 {
+                    let position_mode = if ((flags >> 1) & 1) != 0 {
                         PositionMode::Percent
                     } else {
                         PositionMode::Fixed
@@ -1470,44 +1484,44 @@ impl crate::SkeletonData {
             let mut resolved_any = false;
 
             for pending in remaining {
-                let parent_skin_name = skin_order
-                    .get(pending.parent_skin_index)
+                let source_skin_name = skin_order
+                    .get(pending.source_skin_index)
                     .ok_or_else(|| Error::BinaryParse {
                         message: format!(
-                            "linked mesh parent skin index {} out of range (len={})",
-                            pending.parent_skin_index,
+                            "linked mesh source skin index {} out of range (len={})",
+                            pending.source_skin_index,
                             skin_order.len()
                         ),
                     })?
                     .clone();
-                let Some(parent_skin) = skins_map.get(&parent_skin_name) else {
+                let Some(source_skin) = skins_map.get(&source_skin_name) else {
                     return Err(Error::BinaryParse {
-                        message: "linked mesh parent skin not found".to_string(),
+                        message: "linked mesh source skin not found".to_string(),
                     });
                 };
-                let Some(parent_attachment) =
-                    parent_skin.attachment(pending.slot_index, pending.parent_key.as_str())
+                let Some(source_attachment) =
+                    source_skin.attachment(pending.source_slot_index, pending.source_key.as_str())
                 else {
                     return Err(Error::BinaryParse {
                         message: format!(
-                            "linked mesh parent attachment not found: {}",
-                            pending.parent_key
+                            "linked mesh source attachment not found: {}",
+                            pending.source_key
                         ),
                     });
                 };
-                let AttachmentData::Mesh(parent_mesh) = parent_attachment else {
+                let AttachmentData::Mesh(source_mesh) = source_attachment else {
                     return Err(Error::BinaryParse {
-                        message: "linked mesh parent attachment is not a mesh".to_string(),
+                        message: "linked mesh source attachment is not a mesh".to_string(),
                     });
                 };
-                if parent_mesh.triangles.is_empty() {
+                if source_mesh.triangles.is_empty() {
                     next.push(pending);
                     continue;
                 }
 
-                let parent_vertices = parent_mesh.vertices.clone();
-                let parent_uvs = parent_mesh.uvs.clone();
-                let parent_triangles = parent_mesh.triangles.clone();
+                let source_vertices = source_mesh.vertices.clone();
+                let source_uvs = source_mesh.uvs.clone();
+                let source_triangles = source_mesh.triangles.clone();
 
                 let Some(linked_skin) = skins_map.get_mut(&pending.skin_name) else {
                     continue;
@@ -1521,12 +1535,12 @@ impl crate::SkeletonData {
                 let AttachmentData::Mesh(linked_mesh) = linked_attachment else {
                     continue;
                 };
-                linked_mesh.vertices = parent_vertices;
-                linked_mesh.uvs = parent_uvs;
-                linked_mesh.triangles = parent_triangles;
+                linked_mesh.vertices = source_vertices;
+                linked_mesh.uvs = source_uvs;
+                linked_mesh.triangles = source_triangles;
                 if pending.inherit_timelines {
-                    linked_mesh.timeline_skin = parent_skin_name;
-                    linked_mesh.timeline_attachment = pending.parent_key.clone();
+                    linked_mesh.timeline_skin = source_skin_name;
+                    linked_mesh.timeline_attachment = pending.source_key.clone();
                 } else {
                     linked_mesh.timeline_skin = pending.skin_name.clone();
                     linked_mesh.timeline_attachment = pending.attachment_key.clone();
@@ -1607,6 +1621,7 @@ impl crate::SkeletonData {
                 &path_constraints,
                 &event_defs,
                 scale,
+                nonessential,
             )?;
             if trace_anim {
                 eprintln!("[binary] animation[{ai}] endOffset={}", input.cursor);
@@ -1654,6 +1669,7 @@ fn read_animation(
     path_constraints: &[PathConstraintData],
     event_defs: &[crate::EventData],
     scale: f32,
+    nonessential: bool,
 ) -> Result<Animation, Error> {
     let trace_anim = std::env::var("SPINE2D_BINARY_TRACE_ANIM")
         .ok()
@@ -2750,51 +2766,47 @@ fn read_animation(
         for _ in 0..draw_order_count {
             let time = input.read_f32_be()?;
             duration = duration.max(time);
-            let offset_count = input.read_varint(true)? as usize;
-            if offset_count == 0 {
-                frames.push(crate::DrawOrderFrame {
-                    time,
-                    draw_order_to_setup_index: None,
-                });
-                continue;
-            }
-
-            let slot_count = slots.len();
-            let mut draw_order = vec![usize::MAX; slot_count];
-            let mut unchanged = Vec::with_capacity(slot_count.saturating_sub(offset_count));
-            let mut original_index = 0usize;
-            for _ in 0..offset_count {
-                let slot_index = input.read_varint(true)? as usize;
-                while original_index != slot_index {
-                    unchanged.push(original_index);
-                    original_index += 1;
-                }
-                let offset = input.read_varint(true)? as isize;
-                let dst = (original_index as isize + offset) as usize;
-                draw_order[dst] = original_index;
-                original_index += 1;
-            }
-            while original_index < slot_count {
-                unchanged.push(original_index);
-                original_index += 1;
-            }
-            let mut unchanged_index = unchanged.len();
-            for i in (0..slot_count).rev() {
-                if draw_order[i] == usize::MAX {
-                    unchanged_index -= 1;
-                    draw_order[i] = unchanged[unchanged_index];
-                }
-            }
+            let draw_order = read_draw_order(input, slots.len())?;
             frames.push(crate::DrawOrderFrame {
                 time,
-                draw_order_to_setup_index: Some(draw_order),
+                draw_order_to_setup_index: draw_order,
             });
         }
         Some(crate::DrawOrderTimeline { frames })
     };
 
+    // Draw order folder timelines are not represented by the current public model, but the
+    // official binary stream still contains them between the ordinary draw order and event
+    // timelines.
+    let draw_order_folder_count = input.read_varint(true)? as usize;
+    for _ in 0..draw_order_folder_count {
+        let folder_slot_count = input.read_varint(true)? as usize;
+        for _ in 0..folder_slot_count {
+            let _ = input.read_varint(true)?;
+        }
+        let key_count = input.read_varint(true)? as usize;
+        for _ in 0..key_count {
+            let time = input.read_f32_be()?;
+            duration = duration.max(time);
+            let _ = read_draw_order(input, folder_slot_count)?;
+        }
+    }
+
     // Event timeline
     let event_timeline = read_event_timeline(input, event_defs, &mut duration, trace_anim, name)?;
+
+    if std::env::var("SPINE2D_BINARY_TRACE_ANIM")
+        .ok()
+        .is_some_and(|v| v == "1")
+    {
+        eprintln!(
+            "[binary] read_animation name={name:?} afterEvents offset={}",
+            input.cursor
+        );
+    }
+    if nonessential {
+        let _ = input.read_color_rgba()?;
+    }
 
     Ok(Animation {
         name: name.to_string(),
@@ -2818,6 +2830,43 @@ fn read_animation(
         slider_mix_timelines,
         draw_order_timeline,
     })
+}
+
+fn read_draw_order(
+    input: &mut BinaryInput<'_>,
+    slot_count: usize,
+) -> Result<Option<Vec<usize>>, Error> {
+    let offset_count = input.read_varint(true)? as usize;
+    if offset_count == 0 {
+        return Ok(None);
+    }
+
+    let mut draw_order = vec![usize::MAX; slot_count];
+    let mut unchanged = Vec::with_capacity(slot_count.saturating_sub(offset_count));
+    let mut original_index = 0usize;
+    for _ in 0..offset_count {
+        let slot_index = input.read_varint(true)? as usize;
+        while original_index != slot_index {
+            unchanged.push(original_index);
+            original_index += 1;
+        }
+        let offset = input.read_varint(true)? as isize;
+        let dst = (original_index as isize + offset) as usize;
+        draw_order[dst] = original_index;
+        original_index += 1;
+    }
+    while original_index < slot_count {
+        unchanged.push(original_index);
+        original_index += 1;
+    }
+    let mut unchanged_index = unchanged.len();
+    for i in (0..slot_count).rev() {
+        if draw_order[i] == usize::MAX {
+            unchanged_index -= 1;
+            draw_order[i] = unchanged[unchanged_index];
+        }
+    }
+    Ok(Some(draw_order))
 }
 
 fn read_event_timeline(
@@ -2909,7 +2958,7 @@ fn read_rotate_timeline(
 
 #[cfg(test)]
 mod tests {
-    use super::{BinaryInput, read_event_timeline};
+    use super::{BinaryInput, read_draw_order, read_event_timeline};
     use crate::{EventData, EventTimeline};
 
     fn push_varint(out: &mut Vec<u8>, mut value: u32) {
@@ -2949,6 +2998,11 @@ mod tests {
             .expect("read_event_timeline")
     }
 
+    fn read_only_draw_order(bytes: &[u8], slot_count: usize) -> Option<Vec<usize>> {
+        let mut input = BinaryInput::new(bytes);
+        read_draw_order(&mut input, slot_count).expect("read_draw_order")
+    }
+
     #[test]
     fn binary_event_timeline_null_string_falls_back_to_event_data() {
         let event_defs = vec![EventData {
@@ -2984,5 +3038,23 @@ mod tests {
         assert_eq!(timeline.events.len(), 2);
         assert_eq!(timeline.events[0].string, "DEFAULT");
         assert_eq!(timeline.events[1].string, "OVERRIDE");
+    }
+
+    #[test]
+    fn binary_draw_order_zero_change_count_keeps_setup_order() {
+        let mut bytes = Vec::new();
+        push_varint(&mut bytes, 0);
+
+        assert_eq!(read_only_draw_order(&bytes, 3), None);
+    }
+
+    #[test]
+    fn binary_draw_order_decodes_changed_slots() {
+        let mut bytes = Vec::new();
+        push_varint(&mut bytes, 1); // changeCount
+        push_varint(&mut bytes, 1); // slotIndex
+        push_varint(&mut bytes, 1); // offset
+
+        assert_eq!(read_only_draw_order(&bytes, 3), Some(vec![0, 2, 1]));
     }
 }

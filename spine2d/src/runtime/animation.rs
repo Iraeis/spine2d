@@ -22,8 +22,8 @@ pub enum MixDirection {
     Out,
 }
 
-pub(crate) const ANIMATION_STATE_CURRENT: i32 = 2;
-pub(crate) const ANIMATION_STATE_SETUP: i32 = 1;
+pub(crate) const ANIMATION_STATE_ATTACH_RETAIN: i32 = 2;
+pub(crate) const ANIMATION_STATE_ATTACH_SETUP: i32 = 1;
 
 pub fn apply_animation(
     animation: &Animation,
@@ -119,7 +119,7 @@ pub fn apply_animation(
     }
 
     for timeline in &animation.transform_constraint_timelines {
-        apply_transform_constraint_timeline(timeline, skeleton, time, alpha, blend);
+        apply_transform_constraint_timeline(timeline, skeleton, time, alpha, blend, false);
     }
 
     for timeline in &animation.path_constraint_timelines {
@@ -248,7 +248,7 @@ pub(crate) fn apply_animation_applied(
     }
 
     for timeline in &animation.transform_constraint_timelines {
-        apply_transform_constraint_timeline(timeline, skeleton, time, alpha, blend);
+        apply_transform_constraint_timeline(timeline, skeleton, time, alpha, blend, false);
     }
 
     for timeline in &animation.path_constraint_timelines {
@@ -1448,6 +1448,7 @@ pub(crate) fn apply_transform_constraint_timeline(
     time: f32,
     alpha: f32,
     blend: MixBlend,
+    additive: bool,
 ) {
     if alpha <= 0.0 {
         return;
@@ -1503,6 +1504,28 @@ pub(crate) fn apply_transform_constraint_timeline(
     }
 
     let sampled = sample_transform_mix(&timeline.frames, time);
+    if additive {
+        let base = if blend == MixBlend::Setup {
+            setup
+        } else {
+            (
+                constraint.mix_rotate,
+                constraint.mix_x,
+                constraint.mix_y,
+                constraint.mix_scale_x,
+                constraint.mix_scale_y,
+                constraint.mix_shear_y,
+            )
+        };
+        constraint.mix_rotate = base.0 + sampled.0 * alpha;
+        constraint.mix_x = base.1 + sampled.1 * alpha;
+        constraint.mix_y = base.2 + sampled.2 * alpha;
+        constraint.mix_scale_x = base.3 + sampled.3 * alpha;
+        constraint.mix_scale_y = base.4 + sampled.4 * alpha;
+        constraint.mix_shear_y = base.5 + sampled.5 * alpha;
+        return;
+    }
+
     match blend {
         MixBlend::Setup => {
             constraint.mix_rotate = setup.0 + (sampled.0 - setup.0) * alpha;
@@ -1512,21 +1535,13 @@ pub(crate) fn apply_transform_constraint_timeline(
             constraint.mix_scale_y = setup.4 + (sampled.4 - setup.4) * alpha;
             constraint.mix_shear_y = setup.5 + (sampled.5 - setup.5) * alpha;
         }
-        MixBlend::First | MixBlend::Replace => {
+        MixBlend::First | MixBlend::Replace | MixBlend::Add => {
             constraint.mix_rotate += (sampled.0 - constraint.mix_rotate) * alpha;
             constraint.mix_x += (sampled.1 - constraint.mix_x) * alpha;
             constraint.mix_y += (sampled.2 - constraint.mix_y) * alpha;
             constraint.mix_scale_x += (sampled.3 - constraint.mix_scale_x) * alpha;
             constraint.mix_scale_y += (sampled.4 - constraint.mix_scale_y) * alpha;
             constraint.mix_shear_y += (sampled.5 - constraint.mix_shear_y) * alpha;
-        }
-        MixBlend::Add => {
-            constraint.mix_rotate += sampled.0 * alpha;
-            constraint.mix_x += sampled.1 * alpha;
-            constraint.mix_y += sampled.2 * alpha;
-            constraint.mix_scale_x += sampled.3 * alpha;
-            constraint.mix_scale_y += sampled.4 * alpha;
-            constraint.mix_shear_y += sampled.5 * alpha;
         }
     }
 }
@@ -2109,37 +2124,25 @@ pub(crate) fn apply_attachment(
         return;
     }
 
+    if !attachments
+        && skeleton
+            .slots
+            .get(timeline.slot_index)
+            .is_some_and(|slot| {
+                slot.attachment_state == unkeyed_state + ANIMATION_STATE_ATTACH_RETAIN
+            })
+    {
+        return;
+    }
+
     if time < timeline.frames[0].time {
-        if matches!(blend, MixBlend::Setup | MixBlend::First) {
-            let setup_attachment = skeleton
-                .data
-                .slots
-                .get(timeline.slot_index)
-                .and_then(|s| s.attachment.as_deref())
-                .map(|s| s.to_string());
-            if setup_attachment.is_some() {
-                set_attachment(
-                    skeleton,
-                    timeline.slot_index,
-                    setup_attachment.as_deref(),
-                    attachments,
-                    unkeyed_state,
-                );
-            } else {
-                set_attachment(
-                    skeleton,
-                    timeline.slot_index,
-                    None,
-                    attachments,
-                    unkeyed_state,
-                );
-            }
-        }
-        if let Some(slot) = skeleton.slots.get_mut(timeline.slot_index) {
-            if slot.attachment_state <= unkeyed_state {
-                slot.attachment_state = unkeyed_state + ANIMATION_STATE_SETUP;
-            }
-        }
+        apply_setup_attachment_if_needed(
+            skeleton,
+            timeline.slot_index,
+            blend,
+            attachments,
+            unkeyed_state,
+        );
         return;
     }
 
@@ -2147,19 +2150,49 @@ pub(crate) fn apply_attachment(
         .frames
         .partition_point(|f| f.time <= time)
         .saturating_sub(1);
+    let attachment_name = timeline.frames[frame_index].name.as_deref();
+    if !attachments && attachment_name.is_none() {
+        apply_setup_attachment_if_needed(skeleton, timeline.slot_index, blend, false, unkeyed_state);
+        return;
+    }
 
     set_attachment(
         skeleton,
         timeline.slot_index,
-        timeline.frames[frame_index].name.as_deref(),
+        attachment_name,
         attachments,
         unkeyed_state,
     );
     if let Some(slot) = skeleton.slots.get_mut(timeline.slot_index) {
         if slot.attachment_state <= unkeyed_state {
-            slot.attachment_state = unkeyed_state + ANIMATION_STATE_SETUP;
+            slot.attachment_state = unkeyed_state + ANIMATION_STATE_ATTACH_SETUP;
         }
     }
+}
+
+fn apply_setup_attachment_if_needed(
+    skeleton: &mut Skeleton,
+    slot_index: usize,
+    blend: MixBlend,
+    retain: bool,
+    unkeyed_state: i32,
+) {
+    if blend == MixBlend::Replace || blend == MixBlend::Add {
+        return;
+    }
+    let setup_attachment = skeleton
+        .data
+        .slots
+        .get(slot_index)
+        .and_then(|s| s.attachment.as_deref())
+        .map(str::to_string);
+    set_attachment(
+        skeleton,
+        slot_index,
+        setup_attachment.as_deref(),
+        retain,
+        unkeyed_state,
+    );
 }
 
 fn resolve_attachment_source_skin<'a>(
@@ -2261,7 +2294,7 @@ fn set_attachment(
 
     if old_key == new_key && old_skin == new_skin {
         if attachments {
-            slot.attachment_state = unkeyed_state + ANIMATION_STATE_CURRENT;
+            slot.attachment_state = unkeyed_state + ANIMATION_STATE_ATTACH_RETAIN;
         }
         return;
     }
@@ -2274,7 +2307,7 @@ fn set_attachment(
     slot.attachment_skin = new_skin;
     slot.sequence_index = -1;
     if attachments {
-        slot.attachment_state = unkeyed_state + ANIMATION_STATE_CURRENT;
+        slot.attachment_state = unkeyed_state + ANIMATION_STATE_ATTACH_RETAIN;
     }
 }
 

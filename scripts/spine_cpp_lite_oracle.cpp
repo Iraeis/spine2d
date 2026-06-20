@@ -52,8 +52,7 @@ static void usage() {
          "  --entry-alpha-attachment-threshold <threshold>\n"
          "  --entry-mix-attachment-threshold <threshold>\n"
          "  --entry-mix-draw-order-threshold <threshold>\n"
-         "  --entry-hold-previous <0|1>\n"
-         "  --entry-mix-blend <setup|first|replace|add>\n"
+         "  --entry-additive <0|1>\n"
          "  --entry-reverse <0|1>\n"
          "  --entry-shortest-rotation <0|1>\n"
          "  --entry-reset-rotation-directions\n"
@@ -385,33 +384,13 @@ int main(int argc, char **argv) {
         continue;
       }
 
-      if (std::strcmp(arg, "--entry-hold-previous") == 0 && i + 1 < argc) {
+      if (std::strcmp(arg, "--entry-additive") == 0 && i + 1 < argc) {
         if (!last_entry) {
-          std::cerr << "--entry-hold-previous requires a preceding --set/--add command\n";
+          std::cerr << "--entry-additive requires a preceding --set/--add command\n";
           return 2;
         }
-        const bool hold = std::atoi(argv[i + 1]) ? true : false;
-        spine_track_entry_set_hold_previous(last_entry, hold);
-        i += 1;
-        continue;
-      }
-
-      if (std::strcmp(arg, "--entry-mix-blend") == 0 && i + 1 < argc) {
-        if (!last_entry) {
-          std::cerr << "--entry-mix-blend requires a preceding --set/--add command\n";
-          return 2;
-        }
-        const char *blend = argv[i + 1];
-        spine_mix_blend mix_blend = SPINE_MIX_BLEND_REPLACE;
-        if (std::strcmp(blend, "setup") == 0) mix_blend = SPINE_MIX_BLEND_SETUP;
-        else if (std::strcmp(blend, "first") == 0) mix_blend = SPINE_MIX_BLEND_FIRST;
-        else if (std::strcmp(blend, "replace") == 0) mix_blend = SPINE_MIX_BLEND_REPLACE;
-        else if (std::strcmp(blend, "add") == 0) mix_blend = SPINE_MIX_BLEND_ADD;
-        else {
-          std::cerr << "invalid mix blend: " << blend << "\n";
-          return 2;
-        }
-        spine_track_entry_set_mix_blend(last_entry, mix_blend);
+        const bool additive = std::atoi(argv[i + 1]) ? true : false;
+        spine_track_entry_set_additive(last_entry, additive);
         i += 1;
         continue;
       }
@@ -532,9 +511,10 @@ int main(int argc, char **argv) {
   }
 
   // Draw order as slot data indices.
-  spine_array_slot draw_order = spine_skeleton_get_draw_order(skeleton);
-  const size_t nd = spine_array_slot_size(draw_order);
-  spine_slot *draw_buf = spine_array_slot_buffer(draw_order);
+  spine_draw_order draw_order = spine_skeleton_get_draw_order(skeleton);
+  spine_array_slot draw_order_pose = spine_draw_order_get_applied_pose(draw_order);
+  const size_t nd = spine_array_slot_size(draw_order_pose);
+  spine_slot *draw_buf = spine_array_slot_buffer(draw_order_pose);
   std::cout << "],\"drawOrder\":[";
   for (size_t i = 0; i < nd; i++) {
     spine_slot ds = draw_buf[i];
